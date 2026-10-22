@@ -55,8 +55,8 @@ BLUR_NON_INTRUDERS         = False    # Phase 5: blur non-intruders in evidence
 USE_TRUSTED_PERSONS        = True     # Enable face-based trusted person bypass
 TRUSTED_FACES_DIR          = "trusted_faces"   # Dir with reference images
 FACE_MATCH_THRESHOLD       = 0.35     # Histogram correlation threshold (0-1, higher=stricter)
-CCTV_MATCH_THRESHOLD       = 0.5      # camera-snapshot match (same person ~0.9+,
-                                      #   a different person measured <= 0.21)
+CCTV_MATCH_THRESHOLD       = 0.6      # camera-snapshot match (same person ~0.8-0.99,
+                                      #   other people measured <= 0.49)
 TRUSTED_CLICK_NAME         = "trusted"  # name used for people you click to trust
 TRUSTED_SNAPSHOTS_PER_RUN  = 5        # extra snapshots saved of a clicked person
 TRUSTED_PERSON_ID          = -1       # Track ID assigned to trusted persons
