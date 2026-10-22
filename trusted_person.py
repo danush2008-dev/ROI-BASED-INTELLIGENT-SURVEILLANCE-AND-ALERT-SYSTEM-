@@ -44,14 +44,17 @@ class TrustedPersonDetector:
             print("[Trusted] Trusted person recognition disabled.")
             return
 
-        # Load Haar cascade for face detection
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        self._face_cascade = cv2.CascadeClassifier(cascade_path)
-
-        if self._face_cascade.empty():
-            print("[Trusted] WARNING: Could not load face cascade classifier.")
-            self._enabled = False
-            return
+        # Load Haar cascade for face detection (only needed for face photos;
+        # camera snapshots work without it)
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            self._face_cascade = cv2.CascadeClassifier(cascade_path)
+        except (AttributeError, cv2.error):
+            self._face_cascade = None
+        if self._face_cascade is None or self._face_cascade.empty():
+            print("[Trusted] WARNING: Could not load face cascade classifier "
+                  "- face photos skipped, camera snapshots still used.")
+            self._face_cascade = None
 
         # Load reference faces
         self._load_references()
@@ -157,6 +160,9 @@ class TrustedPersonDetector:
                 self.add_cctv_reference(img, name, save=False)
                 continue
 
+            if self._face_cascade is None:
+                continue                # face photo, but no face detector
+
             # Compute body histogram (upper 60% of image for color profile)
             upper_body = img[:int(img.shape[0] * 0.6), :]
             body_hist = self._compute_face_hist(upper_body)
@@ -222,7 +228,8 @@ class TrustedPersonDetector:
         min_face = 40
         faces = ()
         gray = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
-        if self._references and person_crop.shape[1] >= min_face:
+        if (self._references and self._face_cascade is not None
+                and person_crop.shape[1] >= min_face):
             faces = self._face_cascade.detectMultiScale(
                 gray, scaleFactor=1.05, minNeighbors=4, minSize=(min_face, min_face)
             )

@@ -64,3 +64,20 @@ def test_snapshots_are_loaded_on_next_run(detector, tmp_path):
     again = TrustedPersonDetector()                   # a later run
     ok, name, _ = _check(again, _person(GREY_SHIRT, DARK_TROUSERS, 5))
     assert ok and name == "uncle"
+
+
+def test_works_without_face_detector(tmp_path, monkeypatch):
+    # OpenCV's face file can be missing on a broken install: camera
+    # snapshots must still recognise the trusted person
+    import cv2
+    monkeypatch.setattr(config, "USE_TRUSTED_PERSONS", True)
+    monkeypatch.setattr(config, "TRUSTED_FACES_DIR", str(tmp_path))
+    monkeypatch.setattr(cv2, "CascadeClassifier", lambda path: type(
+        "Empty", (), {"empty": lambda self: True})())
+    cv2.imwrite(str(tmp_path / "uncle.jpg"), _person((150, 120, 200), (40, 35, 30), 9))
+    from trusted_person import TrustedPersonDetector
+    det = TrustedPersonDetector()
+    det.add_cctv_reference(_person(GREY_SHIRT, DARK_TROUSERS, 1), "uncle")
+    assert det.enabled and det.can_enroll
+    ok, name, _ = _check(det, _person(GREY_SHIRT, DARK_TROUSERS, 2))
+    assert ok and name == "uncle"
