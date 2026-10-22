@@ -381,7 +381,8 @@ def main():
     prev_gray = None            # previous frame (grayscale) for following people
     prev_fg = None              # ...and its foreground (moving pixels) mask
     bg_model = BackgroundModel()
-    last_status = None          # ((severity, reasons, dwell), video_time) for the banner
+    last_status = None          # ((severity, reasons, dwell), video_time, incident_id)
+    track_first_seen = {}       # {incident_id: video time first detected}
     ALARM_COOLDOWN_SECONDS = 5
     last_alarm_time = None
 
@@ -662,10 +663,14 @@ def main():
                     continue
                 track_id = det.get('track_id')
                 t_key = str(track_id) if track_id is not None else 'unk'
+                first_seen = track_first_seen.setdefault(t_key, video_time)
                 if not trusted_detector.enabled or t_key in trusted_track_ids:
                     continue
                 x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
-                if frame_count % 2 == 0:  # check every 2nd frame
+                # every frame while a new person is still being identified,
+                # then every 2nd frame
+                identifying = video_time - first_seen < config.TRUST_DECIDE_SECONDS
+                if identifying or frame_count % 2 == 0:
                     is_trusted, match_name, match_conf = (
                         trusted_detector.is_trusted(clean_frame, x1, y1, x2, y2)
                     )
@@ -678,6 +683,8 @@ def main():
                         trusted_track_ids[t_key] = friendly
                         print(f"[Trusted] ID {t_key} recognised as {friendly} "
                               f"(score {match_conf:.2f})")
+                        if last_status and last_status[2] == t_key:
+                            last_status = None      # drop an alert they caused
 
             # ── Clicked people become trusted; save camera snapshots ───────
             while trust_clicks:
@@ -694,6 +701,8 @@ def main():
                 path = trusted_detector.add_cctv_reference(crop, config.TRUSTED_CLICK_NAME)
                 trusted_track_ids[key] = config.TRUSTED_CLICK_NAME
                 enrolled_tracks[key] = [1, video_time]
+                if last_status and last_status[2] == key:
+                    last_status = None              # drop an alert they caused
                 print(f"[Trusted] ID {key} marked as TRUSTABLE PERSON "
                       f"(snapshot saved: {path})")
             # A few more snapshots (other poses/positions) of clicked people,
@@ -825,6 +834,21 @@ def main():
                             test_point[0], test_point[1]
                         )
                     active_entity_keys.add(entity_key)
+
+                    # ── Still being identified (trusted-person check)? ──────
+                    # No alert yet: give the trusted check a moment, so a
+                    # trusted person walking straight into the ROI never
+                    # raises one before being recognised
+                    if (in_roi and trusted_detector.enabled
+                            and name == config.INTRUSION_CLASS
+                            and video_time - track_first_seen.get(cur_incident_id, video_time)
+                            < config.TRUST_DECIDE_SECONDS):
+                        _draw_box_label(frame, (x1, y1, x2, y2), "IDENTIFYING...",
+                                        (255, 255, 255), 2)
+                        if track_id is not None:
+                            track_last_seen[track_id].update(
+                                colour=(255, 255, 255), label="IDENTIFYING...", thick=2)
+                        continue
 
                     # ── Temporal confirmation ──────────────────────────────
                     if config.USE_TEMPORAL_CONFIRMATION:
@@ -965,7 +989,7 @@ def main():
                                      min(y2 + 20, frame.shape[0] - 5)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, pose_color, 2)
 
-                    frame_alerts.append((cur_severity, reasons, dwell_s))
+                    frame_alerts.append((cur_severity, reasons, dwell_s, incident_id))
 
                     # ── Track this as a confirmed intruder ─────────────────
                     confirmed_intruder_ids.add(incident_id)
@@ -993,7 +1017,7 @@ def main():
                         if track_id is not None:
                             track_last_seen[track_id].update(
                                 colour=severity_color, label=overlay_label)
-                        frame_alerts[-1] = (cur_severity, reasons, dwell_s)
+                        frame_alerts[-1] = (cur_severity, reasons, dwell_s, incident_id)
 
                     frame_events.append(dict(
                         incident_id=incident_id, severity=cur_severity,
@@ -1024,7 +1048,7 @@ def main():
             if frame_alerts:
                 order = {sev.LOW: 0, sev.MEDIUM: 1, sev.HIGH: 2}
                 top = max(frame_alerts, key=lambda a: order.get(a[0], 0))
-                last_status = (top, video_time)
+                last_status = (top[:3], video_time, top[3])
             if last_status and video_time - last_status[1] <= config.BANNER_HOLD_SECONDS:
                 _draw_status(frame, *last_status[0])
 

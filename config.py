@@ -59,6 +59,8 @@ CCTV_MATCH_THRESHOLD       = 0.6      # camera-snapshot match (same person ~0.8-
                                       #   other people measured <= 0.49)
 TRUSTED_CLICK_NAME         = "trusted"  # name used for people you click to trust
 TRUSTED_SNAPSHOTS_PER_RUN  = 5        # extra snapshots saved of a clicked person
+TRUST_DECIDE_SECONDS       = 1.0      # a new person in the ROI is "IDENTIFYING..." (no
+                                      #   alert) this long while checked against trusted
 TRUSTED_PERSON_ID          = -1       # Track ID assigned to trusted persons
 
 # ── Speed / performance options ────────────────────────────────────────────
