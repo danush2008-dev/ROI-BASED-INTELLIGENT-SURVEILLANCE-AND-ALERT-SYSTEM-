@@ -222,3 +222,15 @@ class TestHandDrawnROI:
     def test_normal_polygon_unchanged(self):
         from roi_manager import ROIManager
         assert ROIManager._fix_polygon(self.SQUARE) == self.SQUARE
+
+
+def test_sync_after_log_deleted_and_recreated(tmp_path):
+    from event_db import EventDB
+    db = EventDB(db_path=str(tmp_path / "d.db"))
+    log = str(tmp_path / "log.jsonl")
+    _write(log, [_rec(i) for i in range(10)])
+    assert db.sync_from_jsonl(log, "v") == 10
+    os.remove(log)                                       # user deletes the evidence
+    _write(log, [_rec(i, "HIGH") for i in range(20)])    # new run, longer log
+    assert db.sync_from_jsonl(log, "v") == 20
+    assert db.get_event_count("v") == 30                 # old events kept too

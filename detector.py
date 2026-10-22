@@ -78,7 +78,7 @@ class Detector:
         self.model.conf = min(base_conf, config.TRACK_LOW_CONF)
         self.model.classes = None  # we filter manually for flexibility
 
-    def detect(self, frame, roi_bounds=None, min_conf=None):
+    def detect(self, frame, roi_bounds=None, min_conf=None, crop=None):
         """
         Run YOLO inference on a frame.
 
@@ -88,6 +88,8 @@ class Detector:
             min_conf: keep detections down to this confidence instead of
                       CONF_THRESHOLD (the tracker uses weak boxes to keep
                       existing tracks alive)
+            crop: optional (x, y, w, h) area to detect in, enlarged to the
+                  inference size (zoom pass for small people in the ROI)
 
         Returns:
             List of detection dicts: {name, x1, y1, x2, y2, confidence}
@@ -98,8 +100,10 @@ class Detector:
         inference_frame = frame
 
         # Optional: crop to ROI bounding rectangle
-        if config.CROP_TO_ROI_BOUNDS and roi_bounds is not None:
-            rx, ry, rw, rh = roi_bounds
+        if crop is None and config.CROP_TO_ROI_BOUNDS:
+            crop = roi_bounds
+        if crop is not None:
+            rx, ry, rw, rh = crop
             fh, fw = frame.shape[:2]
             # Clamp to frame bounds
             rx = max(0, rx)

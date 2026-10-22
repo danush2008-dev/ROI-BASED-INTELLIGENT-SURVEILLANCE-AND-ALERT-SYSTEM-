@@ -72,13 +72,21 @@ TRACK_LOST_BUFFER = 60                # frames a lost track is remembered (re-us
 
 # ── Display hold-over for brief detector dropouts ──────────────────────────
 BOX_HOLD_SECONDS     = 1.0            # keep drawing a lost person's last box this long
+OCCLUDED_HOLD_SECONDS = 4.0           # ...but this long if they were last seen inside
+                                      #   the ROI (most likely hidden by a railing / gate)
 BANNER_HOLD_SECONDS  = 2.0            # keep the top-left severity banner this long
-CONFIRM_HOLD_SECONDS = 2.0            # a confirmed person stays confirmed through
+CONFIRM_HOLD_SECONDS = 4.0            # a confirmed person stays confirmed through
                                       #   brief detection gaps
 SEVERITY_LATCH       = False          # True: an incident's severity never drops while
                                       #   the person stays in the ROI (video 1)
-TRUST_INHERIT_SECONDS = 3.0           # new track at a just-lost trusted person's spot
-                                      #   inherits the trusted status
+REID_SECONDS         = 4.0            # a new track appearing where a person was lost
+                                      #   this recently is treated as the same person
+
+# ── Zoomed second detection pass over the ROI ─────────────────────────────
+ROI_ZOOM               = True         # re-run YOLO on the enlarged ROI area
+ROI_ZOOM_ACTIVE_SECONDS = 3.0         # keep zooming this long after a person was near
+ROI_ZOOM_PROBE_EVERY   = 5            # otherwise zoom every N-th frame to catch
+                                      #   people too small for the full-frame pass
 
 # ── Temporal confirmation (N-of-M) ────────────────────────────────────────
 TEMPORAL_N = 8                        # must be detected in N of last M frames

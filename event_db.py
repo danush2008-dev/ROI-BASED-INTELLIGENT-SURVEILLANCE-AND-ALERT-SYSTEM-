@@ -12,6 +12,7 @@ Schema:
 
 import os
 import json
+import hashlib
 import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
@@ -82,6 +83,9 @@ class EventDB:
         """Create tables and indexes if they don't exist."""
         with self._connect() as conn:
             conn.executescript(self.SCHEMA)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(import_state)")}
+            if "head_sig" not in cols:
+                conn.execute("ALTER TABLE import_state ADD COLUMN head_sig TEXT")
 
     @contextmanager
     def _connect(self):
@@ -156,10 +160,14 @@ class EventDB:
             return 0
         key = os.path.abspath(jsonl_path)
         size = os.path.getsize(jsonl_path)
+        # Fingerprint of the file's start: tells a log that was deleted and
+        # started again apart from the same log grown longer
+        with open(jsonl_path, 'rb') as f:
+            head_sig = hashlib.sha1(f.read(256)).hexdigest()
 
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT byte_offset FROM import_state WHERE source_path = ?",
+                "SELECT byte_offset, head_sig FROM import_state WHERE source_path = ?",
                 (key,)).fetchone()
             if row is None:
                 # First sync of this log. Events for this label imported by
@@ -170,8 +178,9 @@ class EventDB:
                 offset = 0
             else:
                 offset = row["byte_offset"]
-                if size < offset:       # log was replaced by a new, shorter one
-                    offset = 0
+                if size < offset or (row["head_sig"] and row["head_sig"] != head_sig
+                                     and offset >= 256):
+                    offset = 0          # log was deleted and started again
             if size == offset:
                 return 0
 
@@ -195,8 +204,8 @@ class EventDB:
                 conn.executemany(self._INSERT_SQL, rows)
             conn.execute(
                 "INSERT OR REPLACE INTO import_state "
-                "(source_path, run_label, byte_offset) VALUES (?, ?, ?)",
-                (key, run_label, offset + end))
+                "(source_path, run_label, byte_offset, head_sig) VALUES (?, ?, ?, ?)",
+                (key, run_label, offset + end, head_sig))
         return len(rows)
 
     def import_from_jsonl(self, jsonl_path=None, run_label="live"):

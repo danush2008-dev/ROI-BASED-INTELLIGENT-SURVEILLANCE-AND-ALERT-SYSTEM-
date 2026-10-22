@@ -123,6 +123,19 @@ def _draw_status(frame, severity, reasons, dwell):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
 
+def _merge_detections(primary, extra):
+    """Add detections from the zoom pass that the full-frame pass missed."""
+    merged = list(primary)
+    for e in extra:
+        dup = next((i for i, p in enumerate(merged)
+                    if p['name'] == e['name'] and _iou(p, e) > 0.4), None)
+        if dup is None:
+            merged.append(e)
+        elif e['confidence'] > merged[dup]['confidence']:
+            merged[dup] = e
+    return merged
+
+
 def _iou(a, b):
     """Intersection-over-union of two detection dicts (x1, y1, x2, y2)."""
     ix1, iy1 = max(a['x1'], b['x1']), max(a['y1'], b['y1'])
@@ -285,6 +298,17 @@ def main():
 
     roi_bounds = roi_mgr.get_combined_bounding_rect()
 
+    # Area for the zoomed second detection pass: the ROI(s) plus a margin.
+    # Pointless when the ROI already covers most of the frame.
+    zoom_rect = None
+    if config.ROI_ZOOM and roi_mgr.rois:
+        fh0, fw0 = first_frame_resized.shape[:2]
+        zx, zy, zw, zh = roi_mgr.get_combined_bounding_rect(margin=60)
+        zw, zh = min(zw, fw0 - zx), min(zh, fh0 - zy)
+        if zw * zh < 0.5 * fw0 * fh0:
+            zoom_rect = (zx, zy, zw, zh)
+            print(f"[INFO] ROI zoom pass on area x={zx} y={zy} w={zw} h={zh}")
+
     # ── Initialize modules ─────────────────────────────────────────────────
     print("[INFO] Loading YOLOv5 model...")
     detector = Detector()
@@ -320,6 +344,9 @@ def main():
     track_last_seen = {}        # {track_id: last box/label/colour, for brief dropouts}
     track_max_reasons = {}      # {incident_id: reasons behind its highest severity}
     confirmed_until = {}        # {entity_key: video time its confirmation is held}
+    id_alias = {}               # {new ByteTrack ID: earlier ID of the same person}
+    known_track_ids = set()     # raw ByteTrack IDs already seen
+    zoom_active_until = -1.0    # video time until which the ROI zoom pass runs
     last_status = None          # ((severity, reasons, dwell), video_time) for the banner
     ALARM_COOLDOWN_SECONDS = 5
     last_alarm_time = None
@@ -399,9 +426,31 @@ def main():
                 # person half hidden by the stair railing or the gate), never
                 # to start new ones - so a person's box doesn't vanish as soon
                 # as YOLO gets less sure of them inside the ROI.
+                det_min_conf = config.TRACK_LOW_CONF if use_tracker else None
                 all_detections = detector.detect(
-                    frame, roi_bounds=roi_bounds,
-                    min_conf=config.TRACK_LOW_CONF if use_tracker else None)
+                    frame, roi_bounds=roi_bounds, min_conf=det_min_conf)
+
+                # ── Zoomed second look at the ROI ──────────────────────────
+                # People inside an ROI are often small (far end of the stairs)
+                # or partly hidden, and YOLO misses them on the full frame.
+                # While someone is in/near the ROI (and now and then as a
+                # probe), the ROI area is also run through YOLO enlarged.
+                if zoom_rect is not None and (
+                        video_time <= zoom_active_until
+                        or frame_count % config.ROI_ZOOM_PROBE_EVERY == 0):
+                    zoom_dets = detector.detect(frame, min_conf=det_min_conf,
+                                                crop=zoom_rect)
+                    all_detections = _merge_detections(
+                        all_detections,
+                        [d for d in zoom_dets if d['name'] == config.INTRUSION_CLASS])
+                if zoom_rect is not None:
+                    zx, zy, zw, zh = zoom_rect
+                    if any(d['name'] == config.INTRUSION_CLASS
+                           and d['x2'] > zx and d['x1'] < zx + zw
+                           and d['y2'] > zy and d['y1'] < zy + zh
+                           for d in all_detections):
+                        zoom_active_until = video_time + config.ROI_ZOOM_ACTIVE_SECONDS
+
                 raw_detections = [
                     d for d in all_detections
                     if not config.USE_CONF_THRESHOLD
@@ -411,6 +460,37 @@ def main():
                 # ── ByteTrack tracking ─────────────────────────────────────
                 if use_tracker:
                     detections = tracker.update(all_detections, frame.shape[:2])
+                    # Same person, new ByteTrack ID after being lost (hidden
+                    # by the railing/gate)? Keep the old ID, so their dwell,
+                    # severity, trusted status and box carry on.
+                    frame_ids = {d.get('track_id') for d in detections}
+                    for det in detections:
+                        tid = det.get('track_id')
+                        if tid is None:
+                            continue
+                        if tid in id_alias:
+                            if id_alias[tid] not in frame_ids:
+                                det['track_id'] = id_alias[tid]
+                            continue
+                        if tid in known_track_ids:
+                            continue
+                        known_track_ids.add(tid)
+                        cx, cy = (det['x1'] + det['x2']) / 2, (det['y1'] + det['y2']) / 2
+                        h = det['y2'] - det['y1']
+                        best, best_d = None, None
+                        for old_id, info in track_last_seen.items():
+                            if (old_id in frame_ids or info['name'] != det['name']
+                                    or not 0 < video_time - info['t'] <= config.REID_SECONDS):
+                                continue
+                            ox1, oy1, ox2, oy2 = info['box']
+                            d = math.hypot(cx - (ox1 + ox2) / 2, cy - (oy1 + oy2) / 2)
+                            if d <= 0.75 * max(h, oy2 - oy1) and (best_d is None or d < best_d):
+                                best, best_d = old_id, d
+                        if best is not None:
+                            id_alias[tid] = best
+                            det['track_id'] = best
+                            frame_ids.add(best)
+                            print(f"[Tracker] new ID {tid} is lost ID {best} again")
                 else:
                     detections = raw_detections
 
@@ -483,24 +563,6 @@ def main():
                 if not trusted_detector.enabled or t_key in trusted_track_ids:
                     continue
                 x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
-
-                # A trusted person whose track was briefly lost (and came back
-                # with a new ID) keeps their trusted status
-                if track_id is not None:
-                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                    for tid, info in track_last_seen.items():
-                        if (info.get('trusted') and info['t'] < video_time
-                                and video_time - info['t'] <= config.TRUST_INHERIT_SECONDS):
-                            ix1, iy1, ix2, iy2 = info['box']
-                            dist = math.hypot(cx - (ix1 + ix2) / 2, cy - (iy1 + iy2) / 2)
-                            if dist <= 0.75 * max(y2 - y1, iy2 - iy1):
-                                trusted_track_ids[t_key] = info['trusted']
-                                print(f"[Trusted] ID {t_key} continues trusted "
-                                      f"track {tid} ({info['trusted']})")
-                                break
-                    if t_key in trusted_track_ids:
-                        continue
-
                 if frame_count % 2 == 0:  # check every 2nd frame
                     is_trusted, match_name, match_conf = (
                         trusted_detector.is_trusted(frame, x1, y1, x2, y2)
@@ -558,9 +620,9 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, default_color, 1)
                 if track_id is not None:
                     track_last_seen[track_id] = {
-                        't': video_time, 'box': (x1, y1, x2, y2),
+                        't': video_time, 'box': (x1, y1, x2, y2), 'name': name,
                         'colour': default_color, 'label': " ".join(label_parts),
-                        'thick': 1, 'trusted': None}
+                        'thick': 1, 'trusted': None, 'in_roi': False, 'alert': None}
 
                 # Draw test point
                 if config.USE_FOOT_POINT and name == config.INTRUSION_CLASS:
@@ -601,10 +663,12 @@ def main():
                     if track_id is not None:
                         track_last_seen[track_id].update(
                             colour=(0, 200, 0), label=trust_label, thick=3,
-                            trusted=person_name)
+                            trusted=person_name, in_roi=trusted_roi is not None)
                     if trusted_roi is not None:
                         reasons = [f"trusted_person:{person_name}"]
                         frame_alerts.append((sev.LOW, reasons, None))
+                        if track_id is not None:
+                            track_last_seen[track_id]['alert'] = (sev.LOW, reasons, None)
                         frame_events.append(dict(
                             incident_id=cur_incident_id, severity=sev.LOW,
                             reasons=reasons, dwell_seconds=0.0, behaviour=None,
@@ -648,7 +712,8 @@ def main():
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
                             if track_id is not None:
                                 track_last_seen[track_id].update(
-                                    colour=(0, 255, 255), label=unconf_label, thick=2)
+                                    colour=(0, 255, 255), label=unconf_label, thick=2,
+                                    in_roi=True)
                             # Update dwell even when unconfirmed (for accurate timing)
                             if config.USE_TRACKING and track_id is not None:
                                 dwell_tracker.update(track_id, roi['name'], in_roi, video_time)
@@ -768,6 +833,9 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, pose_color, 2)
 
                     frame_alerts.append((cur_severity, reasons, dwell_s))
+                    if track_id is not None:
+                        track_last_seen[track_id].update(
+                            in_roi=True, alert=(cur_severity, reasons, dwell_s))
 
                     # ── Track this as a confirmed intruder ─────────────────
                     confirmed_intruder_ids.add(incident_id)
@@ -794,7 +862,8 @@ def main():
                                         severity_color, 3)
                         if track_id is not None:
                             track_last_seen[track_id].update(
-                                colour=severity_color, label=overlay_label)
+                                colour=severity_color, label=overlay_label,
+                                alert=(cur_severity, reasons, dwell_s))
                         frame_alerts[-1] = (cur_severity, reasons, dwell_s)
 
                     frame_events.append(dict(
@@ -810,17 +879,32 @@ def main():
 
             # ── Keep showing people the detector briefly lost ──────────────
             # (occluded by the railing / gate, motion blur) at their last box
+            # A person last seen INSIDE the ROI (not at the frame edge, i.e.
+            # not walking out of the picture) is held longer: they are most
+            # likely still there, hidden. Their severity and dwell stay up.
+            fh_, fw_ = frame.shape[:2]
             for tid in list(track_last_seen):
                 info = track_last_seen[tid]
                 age = video_time - info['t']
-                if age > max(config.BOX_HOLD_SECONDS, config.TRUST_INHERIT_SECONDS):
+                if age > max(config.BOX_HOLD_SECONDS, config.OCCLUDED_HOLD_SECONDS,
+                             config.REID_SECONDS):
                     del track_last_seen[tid]
                     continue
-                if tid in seen_track_ids or age > config.BOX_HOLD_SECONDS:
+                if tid in seen_track_ids or info['thick'] <= 1:
                     continue
-                if info['thick'] > 1:      # only people that were in/near the ROI
-                    _draw_box_label(frame, info['box'], info['label'],
-                                    info['colour'], 2)
+                bx1, by1, bx2, by2 = info['box']
+                at_edge = bx1 <= 4 or by1 <= 4 or bx2 >= fw_ - 4 or by2 >= fh_ - 4
+                hold = (config.OCCLUDED_HOLD_SECONDS
+                        if info.get('in_roi') and not at_edge
+                        else config.BOX_HOLD_SECONDS)
+                if age > hold:
+                    continue
+                label = info['label'] + (" (hidden)" if info.get('in_roi') else "")
+                _draw_box_label(frame, info['box'], label, info['colour'], 2)
+                if info.get('alert'):
+                    a_sev, a_reasons, a_dwell = info['alert']
+                    frame_alerts.append((a_sev, a_reasons,
+                                         None if a_dwell is None else a_dwell + age))
 
             # ── Top-left status: severity, reasons and dwell ───────────────
             # Held for a moment after the person was last confirmed, so it
