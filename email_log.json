@@ -1,0 +1,101 @@
+[
+  {
+    "timestamp": "2026-10-22 17:40:59",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:40:59\nSaved image path    : detected_photos_video_1\\detected_2026-10-22_17-40-58.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 0.8s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-40-58.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:42:35",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:42:35\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_17-42-30.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 2.4s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-42-30.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:42:58",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [HIGH]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:42:58\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_17-42-30.jpg\n\nSeverity: HIGH\nReasons: pose:running\nDwell: 8.6s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-42-30.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:43:36",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:43:36\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_17-43-36.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 3.0s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-43-36.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:45:42",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:45:42\nSaved image path    : detected_photos_video_1\\detected_2026-10-22_17-45-41.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 0.8s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-45-41.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:47:12",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:47:12\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_17-47-07.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 2.4s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-47-07.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 17:47:32",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [HIGH]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 17:47:32\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_17-47-07.jpg\n\nSeverity: HIGH\nReasons: pose:running\nDwell: 3.9s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_17-47-07.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 18:10:47",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 18:10:47\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_18-10-41.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 2.4s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_18-10-41.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 18:14:53",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [MEDIUM]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 18:14:53\nSaved image path    : detected_photos_video_2\\detected_2026-10-22_18-14-46.jpg\n\nSeverity: MEDIUM\nReasons: person_walking\nDwell: 2.4s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_18-14-46.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 19:18:50",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [HIGH]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 19:18:50\nSaved image path    : detected_photos_video_3\\detected_2026-10-22_19-18-44.jpg\n\nSeverity: HIGH\nReasons: pose:lying\nDwell: 1.3s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_19-18-44.jpg",
+    "status": "sent (simulated)"
+  },
+  {
+    "timestamp": "2026-10-22 19:19:20",
+    "from": "danush.p0803@gmail.com",
+    "to": "danush.p0803@gmail.com",
+    "subject": "Intruder Alert [HIGH]",
+    "body": "WARNING: A person was detected inside the restricted zone.\n\nDetection timestamp : 2026-10-22 19:19:20\nSaved image path    : detected_photos_video_3\\detected_2026-10-22_19-18-44.jpg\n\nSeverity: HIGH\nReasons: pose:running\nDwell: 6.6s\n\nPlease review the attached image immediately.",
+    "image": "detected_2026-10-22_19-18-44.jpg",
+    "status": "sent (simulated)"
+  }
+]

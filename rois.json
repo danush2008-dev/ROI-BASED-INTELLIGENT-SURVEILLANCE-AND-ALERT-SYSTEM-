@@ -1,0 +1,25 @@
+[
+  {
+    "name": "Zone 1",
+    "points": [
+      [
+        42,
+        23
+      ],
+      [
+        805,
+        23
+      ],
+      [
+        805,
+        454
+      ],
+      [
+        42,
+        454
+      ]
+    ],
+    "restricted_hours": null,
+    "sensitivity": 1.0
+  }
+]

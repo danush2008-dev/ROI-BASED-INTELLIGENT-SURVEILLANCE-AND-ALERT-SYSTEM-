@@ -1,0 +1,55 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Model and framework caches
+.cache/
+.cache_torch/
+*.pt
+*.pth
+*.onnx
+
+# Generated database and evidence
+*.db
+evidence_video_*/
+detected_photos_video_*/
+clips/
+*.avi
+
+# Environment secrets
+.env
+
+# Editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+
+# SQLite databases and temporary journal files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Python environment
+.venv/
+__pycache__/
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Generated evidence
+evidence_video_*/
+detected_photos_video_*/
+
+# Secrets
+.env
+
+# Local test videos
+*.mp4
