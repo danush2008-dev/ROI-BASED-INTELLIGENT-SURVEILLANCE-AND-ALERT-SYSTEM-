@@ -758,32 +758,17 @@ def main():
                 if name == config.INTRUSION_CLASS and track_id is not None:
                     get_motion(str(track_id), test_point, y2 - y1)
 
-                # ── Trusted person: green box, LOW, no alert ───────────────
+                # ── Trusted person: green "TRUSTABLE PERSON" box, no alert ──
+                # No severity, dwell, banner, event, email or alarm - not even
+                # inside the ROI. Their box still moves with them.
                 cur_incident_id = str(track_id) if track_id is not None else 'unk'
                 if name == config.INTRUSION_CLASS and cur_incident_id in trusted_track_ids:
-                    person_name = trusted_track_ids[cur_incident_id]
-                    trusted_roi = next(
-                        (r for r in roi_mgr.rois
-                         if roi_mgr.box_in_roi(r, x1, y1, x2, y2, test_point)), None)
-                    trust_label = f"TRUSTED - {person_name}"
-                    if trusted_roi is not None:
-                        trust_label += " | LOW"
+                    trust_label = "TRUSTABLE PERSON"
                     _draw_box_label(frame, (x1, y1, x2, y2), trust_label, (0, 200, 0), 3)
-                    cv2.putText(frame, "NO ALERT",
-                                (x1, y2 + 18),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
                     if track_id is not None:
                         track_last_seen[track_id].update(
                             colour=(0, 200, 0), label=trust_label, thick=3,
-                            trusted=person_name)
-                    if trusted_roi is not None:
-                        reasons = [f"trusted_person:{person_name}"]
-                        frame_alerts.append((sev.LOW, reasons, None))
-                        frame_events.append(dict(
-                            incident_id=cur_incident_id, severity=sev.LOW,
-                            reasons=reasons, dwell_seconds=0.0, behaviour=None,
-                            roi_name=trusted_roi['name'], track_id=track_id,
-                            force_photo=False, escalated=False, prev_severity=None))
+                            trusted=trusted_track_ids[cur_incident_id])
                     continue
 
                 # ── ROI check for each ROI ─────────────────────────────────
