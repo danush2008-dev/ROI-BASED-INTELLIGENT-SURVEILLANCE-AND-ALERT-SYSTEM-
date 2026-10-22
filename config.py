@@ -20,7 +20,8 @@ EMAIL_RECEIVER     = os.getenv("EMAIL_RECEIVER", "")
 EMAIL_COOLDOWN_SECONDS = 30          # minimum seconds between emails (per-track)
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-ALARM_PATH          = "Alarm/alarm.wav"
+ALARM_PATH          = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "Alarm", "alarm.wav")
 DETECTED_PHOTOS_DIR = "detected_photos"
 ROI_JSON_PATH       = "rois.json"
 EVIDENCE_DIR        = "evidence"
@@ -61,6 +62,21 @@ CROP_TO_ROI_BOUNDS    = False         # crop frame to ROI bounding rect before Y
 
 # ── Confidence threshold ───────────────────────────────────────────────────
 CONF_THRESHOLD = 0.5                  # ignore detections below this
+TRACK_LOW_CONF = 0.15                 # with tracking: weaker boxes (down to this) may
+                                      #   keep an EXISTING track alive - e.g. a person
+                                      #   half hidden by a railing - but never start one
+TRACK_ACTIVATION_CONF = 0.4           # ByteTrack: a new track needs > this + 0.1
+TRACK_LOST_BUFFER = 60                # frames a lost track is remembered (re-use its ID)
+
+# ── Display hold-over for brief detector dropouts ──────────────────────────
+BOX_HOLD_SECONDS     = 1.0            # keep drawing a lost person's last box this long
+BANNER_HOLD_SECONDS  = 2.0            # keep the top-left severity banner this long
+CONFIRM_HOLD_SECONDS = 2.0            # a confirmed person stays confirmed through
+                                      #   brief detection gaps
+SEVERITY_LATCH       = False          # True: an incident's severity never drops while
+                                      #   the person stays in the ROI (video 1)
+TRUST_INHERIT_SECONDS = 3.0           # new track at a just-lost trusted person's spot
+                                      #   inherits the trusted status
 
 # ── Temporal confirmation (N-of-M) ────────────────────────────────────────
 TEMPORAL_N = 8                        # must be detected in N of last M frames

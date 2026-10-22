@@ -72,17 +72,22 @@ class Detector:
                     f"Cannot load YOLOv5 model and local weights not found at {local_weights}"
                 ) from e
 
-        # Configure model
-        self.model.conf = config.CONF_THRESHOLD if config.USE_CONF_THRESHOLD else 0.25
+        # Configure model (low NMS floor; detect() applies the real threshold)
+        base_conf = config.CONF_THRESHOLD if config.USE_CONF_THRESHOLD else 0.25
+        self._base_conf = base_conf
+        self.model.conf = min(base_conf, config.TRACK_LOW_CONF)
         self.model.classes = None  # we filter manually for flexibility
 
-    def detect(self, frame, roi_bounds=None):
+    def detect(self, frame, roi_bounds=None, min_conf=None):
         """
         Run YOLO inference on a frame.
 
         Args:
             frame: BGR image (numpy array)
             roi_bounds: optional (x, y, w, h) tuple to crop before inference
+            min_conf: keep detections down to this confidence instead of
+                      CONF_THRESHOLD (the tracker uses weak boxes to keep
+                      existing tracks alive)
 
         Returns:
             List of detection dicts: {name, x1, y1, x2, y2, confidence}
@@ -133,7 +138,12 @@ class Detector:
                 continue
 
             # Confidence filter
-            if config.USE_CONF_THRESHOLD and confidence < config.CONF_THRESHOLD:
+            if min_conf is not None:
+                if confidence < min_conf:
+                    continue
+            elif config.USE_CONF_THRESHOLD and confidence < config.CONF_THRESHOLD:
+                continue
+            elif confidence < self._base_conf:
                 continue
 
             # Map coordinates back to original frame

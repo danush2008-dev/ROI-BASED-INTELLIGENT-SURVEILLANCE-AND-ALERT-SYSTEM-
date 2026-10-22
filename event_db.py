@@ -86,7 +86,9 @@ class EventDB:
     @contextmanager
     def _connect(self):
         """Context manager for database connections."""
-        conn = sqlite3.connect(self._db_path)
+        # phy.py and the dashboard write to the same file; wait for the
+        # other one's commit instead of failing with "database is locked"
+        conn = sqlite3.connect(self._db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
             yield conn

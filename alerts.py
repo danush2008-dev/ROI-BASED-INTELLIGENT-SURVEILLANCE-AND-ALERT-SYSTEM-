@@ -9,6 +9,7 @@ Handles:
 """
 
 import os
+import time
 import queue
 import threading
 import smtplib
@@ -225,12 +226,19 @@ def _log_email(sender, receiver, subject, body, image_path,
         # Write to a temp file and swap it in, so the dashboard never
         # reads a half-written file
         tmp_path = EMAIL_LOG_PATH + ".tmp"
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(log_data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp_path, EMAIL_LOG_PATH)
-        except IOError as e:
-            print(f"[EMAIL] Warning: could not write email log: {e}")
+        for attempt in range(10):
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(log_data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, EMAIL_LOG_PATH)
+                break
+            except OSError as e:
+                # On Windows the swap fails while the dashboard has the file
+                # open for reading - retry briefly
+                if attempt == 9:
+                    print(f"[EMAIL] Warning: could not write email log: {e}")
+                else:
+                    time.sleep(0.1)
 
     print(f"[EMAIL] Alert email logged ({status}) at {detection_time}")
     print(f"[EMAIL]   To: {receiver} | Subject: {subject}")

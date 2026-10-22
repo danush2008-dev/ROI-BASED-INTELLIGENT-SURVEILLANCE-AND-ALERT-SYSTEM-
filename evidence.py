@@ -355,20 +355,22 @@ class EvidenceManager:
             return self._clip_recorder.push_frame(frame)
         return None
 
-    def save_photo(self, frame, incident_id="global"):
+    def save_photo(self, frame, incident_id="global", force=False):
         """
         Save an evidence photo for the given incident.
 
         Args:
             frame: BGR image to save
             incident_id: unique identifier for the incident (e.g. track ID)
+            force: save even if the per-incident limit is reached
+                   (used for severity escalations)
 
         Returns:
             The file path if saved, None if limit reached.
         """
         # Check per-incident limit
         count = self._photo_counts.get(incident_id, 0)
-        if count >= config.MAX_PHOTOS_PER_INCIDENT:
+        if count >= config.MAX_PHOTOS_PER_INCIDENT and not force:
             return None
 
         # Milliseconds + incident ID keep names unique, so a photo from

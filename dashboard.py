@@ -25,7 +25,10 @@ import argparse
 import threading
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Read evidence / photos / logs from the project folder (where phy.py writes
+# them), whichever folder the dashboard was started from.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from flask import Flask, jsonify, request, send_from_directory, render_template_string
@@ -92,6 +95,27 @@ def auto_import(force=False):
 
 
 # ── API Routes ────────────────────────────────────────────────────────────
+
+@app.after_request
+def no_cache(resp):
+    """Never let the browser serve stale dashboard data."""
+    if not request.path.startswith("/evidence-file/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/status")
+def api_status():
+    """Latest run and totals, shown in the header so updates are visible."""
+    auto_import()
+    runs = db.get_ablation_runs()
+    latest = max(runs, key=lambda r: r.get("timestamp") or "") if runs else None
+    return jsonify({
+        "total_events": db.get_event_count(),
+        "latest_run": latest["run_label"] if latest else None,
+        "server_time": datetime.now().strftime("%H:%M:%S"),
+    })
+
 
 @app.route("/api/refresh")
 def api_refresh():
@@ -775,6 +799,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                 <h1>ROI Surveillance Dashboard</h1>
             </div>
             <div class="header-right">
+                <div class="status-badge" id="run-status" style="color:var(--text-secondary)">Connecting...</div>
                 <div class="status-badge" id="chain-status">
                     <span class="status-dot"></span>
                     <span>Loading...</span>
@@ -1396,12 +1421,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         }
     }
 
+    // ── Header: latest run + total events (shows the dashboard is live) ───
+    let lastRunSeen = null;
+    async function checkStatus() {
+        try {
+            const st = await api('/api/status');
+            document.getElementById('run-status').textContent =
+                `Last run: ${st.latest_run || '-'} · ${st.total_events} events · updated ${st.server_time}`;
+            if (lastRunSeen !== null && st.latest_run !== lastRunSeen) {
+                // A dry run just finished: redraw everything with its data
+                for (const k in lastRendered) delete lastRendered[k];
+                const activeTab = document.querySelector('.tab.active');
+                if (activeTab) loaders[activeTab.dataset.tab]();
+                checkChain();
+            }
+            lastRunSeen = st.latest_run;
+        } catch (e) {
+            document.getElementById('run-status').textContent = 'Dashboard server offline';
+        }
+    }
+
     // ── Initialize ────────────────────────────────────────────────────────
     // Chart.js loads with `defer`, i.e. after this script; start once it has.
     document.addEventListener('DOMContentLoaded', () => {
         loadOverview();
         checkChain();
+        checkStatus();
     });
+    setInterval(checkStatus, 3000);
 
     // Auto-refresh whichever tab is open, so every tab (not just the
     // overview) shows new events, photos, emails and runs while a video runs.
