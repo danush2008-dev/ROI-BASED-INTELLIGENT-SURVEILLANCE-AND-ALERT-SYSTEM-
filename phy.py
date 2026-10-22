@@ -21,6 +21,7 @@ import os
 import sys
 import math
 import json
+import time
 import argparse
 import warnings
 from collections import Counter, deque
@@ -39,7 +40,7 @@ from alerts import AlertWorker
 from evidence import EvidenceManager, blur_non_intruders
 from confirmation import TemporalConfirmer
 from tracker import Tracker, DwellTracker
-from pose_estimator import PoseEstimator, update_motion
+from pose_estimator import PoseEstimator, update_motion, foot_speed
 from event_db import EventDB
 from trusted_person import TrustedPersonDetector
 import severity as sev
@@ -82,6 +83,18 @@ def parse_args():
     return parser.parse_args()
 
 
+def _iou(a, b):
+    """Intersection-over-union of two detection dicts (x1, y1, x2, y2)."""
+    ix1, iy1 = max(a['x1'], b['x1']), max(a['y1'], b['y1'])
+    ix2, iy2 = min(a['x2'], b['x2']), min(a['y2'], b['y2'])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    area_a = (a['x2'] - a['x1']) * (a['y2'] - a['y1'])
+    area_b = (b['x2'] - b['x1']) * (b['y2'] - b['y1'])
+    return inter / float(area_a + area_b - inter)
+
+
 def main():
     args = parse_args()
 
@@ -92,6 +105,7 @@ def main():
         config.DEMO_MODE = True
 
     # ── Apply JSON config overrides (ablation testing) ─────────────────────
+    overrides = {}
     if args.config_json:
         try:
             overrides = json.loads(args.config_json)
@@ -101,6 +115,12 @@ def main():
                     print(f"[Config] Override: {key} = {value}")
         except json.JSONDecodeError as e:
             print(f"[WARNING] Invalid --config-json: {e}")
+            overrides = {}
+
+    def set_default(key, value):
+        """Per-video setting; an explicit --config-json override wins."""
+        if key not in overrides:
+            setattr(config, key, value)
 
     # ── Determine video source ─────────────────────────────────────────────
     source = args.source if args.source is not None else config.DEFAULT_SOURCE
@@ -108,6 +128,8 @@ def main():
         source = int(source)
     except (ValueError, TypeError):
         pass
+
+    run_tag = "input_video"     # label for this source in the dashboard
 
     # ── Per-video path isolation ───────────────────────────────────────────
     # When running on a video file (not webcam), derive a tag from the
@@ -119,13 +141,14 @@ def main():
 
         # Only isolate if this is NOT the original default video
         if _base != os.path.splitext(config.DEFAULT_SOURCE)[0]:
-            config.ROI_JSON_PATH       = f"rois_{_tag}.json"
-            config.EVIDENCE_DIR        = f"evidence_{_tag}"
-            config.CLIPS_DIR           = os.path.join(config.EVIDENCE_DIR, "clips")
-            config.EVIDENCE_LOG_PATH   = os.path.join(config.EVIDENCE_DIR, "evidence_log.jsonl")
-            config.DB_PATH             = f"events_{_tag}.db"
-            config.DETECTED_PHOTOS_DIR = f"detected_photos_{_tag}"
-            config.DEMO_OUTPUT_PATH    = f"demo_output_{_tag}.mp4"
+            run_tag = _tag
+            set_default("ROI_JSON_PATH",       f"rois_{_tag}.json")
+            set_default("EVIDENCE_DIR",        f"evidence_{_tag}")
+            set_default("CLIPS_DIR",           os.path.join(config.EVIDENCE_DIR, "clips"))
+            set_default("EVIDENCE_LOG_PATH",   os.path.join(config.EVIDENCE_DIR, "evidence_log.jsonl"))
+            set_default("DB_PATH",             f"events_{_tag}.db")
+            set_default("DETECTED_PHOTOS_DIR", f"detected_photos_{_tag}")
+            set_default("DEMO_OUTPUT_PATH",    f"demo_output_{_tag}.mp4")
             print(f"[INFO] Per-video paths set for '{_base}':")
             print(f"       ROI file  : {config.ROI_JSON_PATH}")
             print(f"       Evidence  : {config.EVIDENCE_DIR}/")
@@ -139,23 +162,30 @@ def main():
         # Video 1: running person -> HIGH alert + alarm (default behaviour)
         #          Trusted person detection OFF
         if 'video 1' in _src_lower or 'video_1' in _src_lower:
-            config.USE_TRUSTED_PERSONS = False
+            set_default("USE_TRUSTED_PERSONS", False)
+            # Climbing stairs is slow in body heights / s, so a lower bar
+            # than on flat ground catches someone rushing up the stairs.
+            set_default("RUNNING_RAISES_ALARM", True)
+            set_default("RUN_SPEED_BH_PER_S", 0.6)
             print("[INFO] Video 1: Trusted person detection DISABLED.")
-            print("[INFO] Video 1: Running person -> HIGH alert + audible alarm.")
+            print(f"[INFO] Video 1: Running up the stairs (>= {config.RUN_SPEED_BH_PER_S} "
+                  f"body heights/s) -> HIGH alert + audible alarm.")
 
         # Video 2: trusted uncle detection ON
         elif 'video 2' in _src_lower or 'video_2' in _src_lower:
-            config.USE_TRUSTED_PERSONS = True
+            set_default("USE_TRUSTED_PERSONS", True)
             print("[INFO] Video 2: Trusted person detection ENABLED (uncle).")
 
-        # Video 3: vehicle passing -> LOW, walking person -> LOW
+        # Video 3: vehicle passing -> LOW, person walking past -> LOW (log only)
         #          Trusted person detection OFF
         elif 'video 3' in _src_lower or 'video_3' in _src_lower:
-            config.ALERT_ON_VEHICLES = True
-            config.USE_TRUSTED_PERSONS = False
-            config.WALKING_IS_LOW = True  # Custom flag: keep walking at LOW
+            set_default("ALERT_ON_VEHICLES", True)
+            set_default("USE_TRUSTED_PERSONS", False)
+            set_default("WALKING_IS_LOW", True)
+            set_default("PASSERBY_IS_LOW", True)
+            set_default("RUNNING_RAISES_ALARM", False)
             print("[INFO] Video 3: Vehicle alerts ENABLED (LOW).")
-            print("[INFO] Video 3: Walking person -> LOW alert.")
+            print("[INFO] Video 3: Person walking past -> LOW (log only, no email/alarm).")
             print("[INFO] Video 3: Trusted person detection DISABLED.")
 
     # ── Open video capture ─────────────────────────────────────────────────
@@ -208,7 +238,7 @@ def main():
     detector = Detector()
     print("[INFO] Model loaded.")
 
-    alert_worker = AlertWorker(dry_run=args.dry_run)
+    alert_worker = AlertWorker(dry_run=args.dry_run, source_label=run_tag)
     evidence_mgr = EvidenceManager()
     confirmer = TemporalConfirmer()
     tracker = Tracker()
@@ -234,6 +264,7 @@ def main():
     track_pose_history = {}     # {incident_id: deque of recent pose labels}
     track_pose_debug = {}       # {incident_id: debug string}
     track_foot_hist = {}        # {incident_id: deque of (time, x, y) foot points}
+    track_running_until = {}    # {incident_id: video time until which 'running' holds}
     ALARM_COOLDOWN_SECONDS = 5
     last_alarm_time = None
 
@@ -243,6 +274,17 @@ def main():
     fps_frame_count = 0
     display_fps = 0.0
     last_detections = []
+    last_raw_detections = []
+
+    # ── Run statistics (saved to the dashboard at the end of the run) ──────
+    run_started = time.time()
+    run_started_iso = datetime.now().isoformat(timespec="seconds")
+    stat_detections = 0
+    stat_severity = Counter()
+    stat_incidents = set()
+    stat_dwell_sum = 0.0
+    stat_dwell_max = 0.0
+    pending_db_events = []      # SQLite inserts are batched (one commit per batch)
 
     # ── Display ────────────────────────────────────────────────────────────
     if not args.headless:
@@ -293,22 +335,48 @@ def main():
             run_detection = (frame_count % config.DETECT_EVERY_N_FRAMES == 0)
 
             if run_detection and len(roi_mgr.rois) > 0:
-                detections = detector.detect(frame, roi_bounds=roi_bounds)
+                raw_detections = detector.detect(frame, roi_bounds=roi_bounds)
+                stat_detections += len(raw_detections)
+                detections = raw_detections
 
                 # ── ByteTrack tracking ─────────────────────────────────────
                 if config.USE_TRACKING and tracker.enabled:
-                    detections = tracker.update(detections, frame.shape[:2])
+                    detections = tracker.update(raw_detections, frame.shape[:2])
 
                 last_detections = detections
+                last_raw_detections = raw_detections
             elif not run_detection and len(roi_mgr.rois) > 0:
                 detections = last_detections
+                raw_detections = last_raw_detections
             else:
                 detections = []
+                raw_detections = []
 
             # ── Push frame to clip recorder circular buffer ────────────────
             clip_done = evidence_mgr.push_frame(frame)
             if clip_done:
                 print(f"[Main] Clip finalized: {clip_done}")
+
+            # ── Draw ROIs first so every bounding box is drawn on top ─────
+            if len(roi_mgr.rois) > 0:
+                roi_mgr.draw_rois_on_frame(frame)
+
+            # ── Boxes the tracker has not picked up (yet) ─────────────────
+            # ByteTrack drops detections it cannot match - typically a person
+            # moving fast (e.g. running up the stairs) or a brand-new track.
+            # Draw them anyway so a person is never invisible inside the ROI.
+            if detections is not raw_detections:
+                for raw in raw_detections:
+                    if any(_iou(raw, d) > 0.3 for d in detections):
+                        continue
+                    rx1, ry1, rx2, ry2 = raw['x1'], raw['y1'], raw['x2'], raw['y2']
+                    foot = ROIManager.get_foot_point(rx1, ry1, rx2, ry2)
+                    inside = any(ROIManager.point_in_polygon(foot, r["points"])
+                                 for r in roi_mgr.rois)
+                    colour = (0, 165, 255) if inside else (255, 255, 0)
+                    cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), colour, 3 if inside else 1)
+                    cv2.putText(frame, f"{raw['name']} (tracking...)", (rx1, ry1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, colour, 1)
 
             # ── Per-ROI person counting ────────────────────────────────────
             # Count confirmed persons per ROI for severity calculation
@@ -454,8 +522,16 @@ def main():
                     fh = track_foot_hist.setdefault(incident_id, deque())
                     move_px = update_motion(fh, video_time,
                                             test_point[0], test_point[1])
+                    speed_bh = foot_speed(fh, video_time, y2 - y1)
                     is_moving = config.USE_MOTION_CUE and move_px >= config.MOVE_MIN_PIXELS
-                    is_running = config.USE_MOTION_CUE and move_px >= config.RUNNING_MIN_PIXELS
+                    was_running = video_time < track_running_until.get(incident_id, -1.0)
+                    if config.USE_MOTION_CUE and speed_bh >= config.RUN_SPEED_BH_PER_S:
+                        track_running_until[incident_id] = (
+                            video_time + config.RUNNING_HOLD_SECONDS)
+                        if not was_running:
+                            print(f"[Motion] id={incident_id} RUNNING "
+                                  f"({speed_bh:.2f} body heights/s)")
+                    is_running = video_time < track_running_until.get(incident_id, -1.0)
 
                     # ── Dwell time ─────────────────────────────────────────
                     if config.USE_TRACKING and track_id is not None:
@@ -483,10 +559,6 @@ def main():
                         if is_moving and behaviour == 'sitting':
                             behaviour = 'standing'
                             moved_override = True
-                        # Running detection: fast motion + upright = running
-                        if is_running and behaviour in ('standing', 'unknown'):
-                            behaviour = 'running'
-                            moved_override = True
                         # Smooth: majority vote over the last few pose results
                         # so the label doesn't flicker between sitting/standing
                         hist = track_pose_history.setdefault(
@@ -498,7 +570,8 @@ def main():
                             behaviour = Counter(hist).most_common(1)[0][0]
                         track_behaviours[incident_id] = behaviour
                         track_pose_debug[incident_id] = (
-                            f"{pose_estimator.last_debug} mv:{move_px:.0f}"
+                            f"{pose_estimator.last_debug} mv:{move_px:.0f} "
+                            f"spd:{speed_bh:.2f}bh/s"
                             + (" MOVING" if moved_override else ""))
                         if config.DEBUG_POSE and frame_count % 15 == 0:
                             print(f"[PoseDebug] id={incident_id} "
@@ -506,6 +579,14 @@ def main():
                     else:
                         # Use cached behaviour from last pose frame
                         behaviour = track_behaviours.get(incident_id)
+
+                    # ── Running: fast foot-point motion (any pose but lying)
+                    #    Checked every frame, so it works without pose too.
+                    if name == config.INTRUSION_CLASS and behaviour != 'lying':
+                        if is_running:
+                            behaviour = 'running'
+                        elif config.PASSERBY_IS_LOW and is_moving:
+                            behaviour = 'walking'
 
                     # ── Draw skeleton + behaviour label ────────────────────
                     if pose_landmarks:
@@ -518,6 +599,7 @@ def main():
                         behavior=behaviour,
                         roi=roi,
                         is_vehicle=is_vehicle,
+                        is_moving=is_moving,
                     )
                     severity_color = sev.SEVERITY_COLORS.get(cur_severity, (0, 0, 255))
 
@@ -628,8 +710,16 @@ def main():
                         track_id=track_id,
                     )
 
-                    # ── Log event to SQLite database ────────────────────────
-                    event_db.insert_event(log_record)
+                    # ── Log event to SQLite database (batched) ──────────────
+                    pending_db_events.append(log_record)
+                    if len(pending_db_events) >= 50:
+                        event_db.insert_events(pending_db_events)
+                        pending_db_events = []
+
+                    stat_severity[cur_severity] += 1
+                    stat_incidents.add(incident_id)
+                    stat_dwell_sum += dwell_s
+                    stat_dwell_max = max(stat_dwell_max, dwell_s)
 
                     # ── Alarm (severity-gated + cooldown) ──────────────────
                     if sev.should_play_alarm(cur_severity):
@@ -681,10 +771,6 @@ def main():
                 if frame_count % 100 == 0:
                     confirmer.cleanup_stale()
 
-            # ── Draw ROIs on frame ─────────────────────────────────────────
-            if len(roi_mgr.rois) > 0:
-                roi_mgr.draw_rois_on_frame(frame)
-
             # ── FPS overlay ────────────────────────────────────────────────
             cv2.putText(frame, f"FPS: {display_fps:.1f}",
                         (frame.shape[1] - 140, 25),
@@ -720,6 +806,42 @@ def main():
     if not args.headless:
         cv2.destroyAllWindows()
     alert_worker.shutdown()
+
+    if pending_db_events:
+        event_db.insert_events(pending_db_events)
+
+    # ── Record this run for the dashboard (Ablation tab) ───────────────────
+    # Ablation profiles (--config-json) are recorded by ablation.py itself.
+    if not args.config_json:
+        n_events = sum(stat_severity.values())
+        wall = time.time() - run_started
+        try:
+            EventDB(db_path=config.DASHBOARD_DB_PATH).save_ablation_run({
+                "run_label": f"{run_tag} @ {run_started_iso.replace('T', ' ')}",
+                "timestamp": run_started_iso,
+                "config": {k: getattr(config, k) for k in (
+                    "USE_FOOT_POINT", "USE_CONF_THRESHOLD",
+                    "USE_TEMPORAL_CONFIRMATION", "USE_TRACKING", "USE_POSE",
+                    "USE_TRUSTED_PERSONS", "ALERT_ON_VEHICLES",
+                    "PASSERBY_IS_LOW", "RUNNING_RAISES_ALARM",
+                    "RUN_SPEED_BH_PER_S")},
+                "source": str(source),
+                "total_frames": frame_count,
+                "wall_seconds": round(wall, 2),
+                "avg_fps": round(frame_count / wall, 1) if wall > 0 else 0.0,
+                "total_detections": stat_detections,
+                "confirmed_intrusions": n_events,
+                "low_count": stat_severity[sev.LOW],
+                "medium_count": stat_severity[sev.MEDIUM],
+                "high_count": stat_severity[sev.HIGH],
+                "unique_tracks": len(stat_incidents),
+                "avg_dwell": round(stat_dwell_sum / n_events, 2) if n_events else 0.0,
+                "max_dwell": round(stat_dwell_max, 2),
+                "notes": f"{run_tag} run" + (" (dry-run)" if args.dry_run else ""),
+            })
+            print(f"[INFO] Run summary saved to {config.DASHBOARD_DB_PATH}")
+        except Exception as e:
+            print(f"[WARNING] Could not save run summary: {e}")
 
     # ── Verify evidence chain on exit ──────────────────────────────────────
     valid, count, err = evidence_mgr.verify_chain()

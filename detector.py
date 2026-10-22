@@ -31,13 +31,30 @@ class Detector:
         """
         local_weights = os.path.join(os.path.dirname(__file__), "yolov5s.pt")
 
+        # Fast path: torch.hub.load('ultralytics/yolov5', ...) contacts
+        # GitHub on every start even when the code is already cached, which
+        # makes startup slow. Load the cached copy directly when it exists.
+        cached_repo = os.path.join(torch.hub.get_dir(), "ultralytics_yolov5_master")
+        if os.path.isdir(cached_repo):
+            try:
+                self.model = torch.hub.load(
+                    cached_repo, 'yolov5s', source='local',
+                    pretrained=True, verbose=False
+                )
+                print("[Detector] YOLOv5s loaded from local hub cache.")
+            except Exception as e:
+                print(f"[Detector] Local hub cache load failed ({e}), "
+                      f"falling back to torch hub...")
+                self.model = None
+
         try:
-            # Try loading from hub (will use cache if available)
-            self.model = torch.hub.load(
-                'ultralytics/yolov5', 'yolov5s', pretrained=True,
-                verbose=False, trust_repo=True
-            )
-            print("[Detector] YOLOv5s loaded from torch hub.")
+            if self.model is None:
+                # Try loading from hub (will use cache if available)
+                self.model = torch.hub.load(
+                    'ultralytics/yolov5', 'yolov5s', pretrained=True,
+                    verbose=False, trust_repo=True
+                )
+                print("[Detector] YOLOv5s loaded from torch hub.")
         except Exception as e:
             print(f"[Detector] Hub load failed ({e}), trying local weights...")
             if os.path.exists(local_weights):
@@ -102,11 +119,14 @@ class Detector:
 
         # Run inference
         results = self.model(resized)
+        names = results.names
 
+        # Read the raw tensor (x1, y1, x2, y2, conf, cls) - building a pandas
+        # DataFrame every frame is much slower
         detections = []
-        for _, row in results.pandas().xyxy[0].iterrows():
-            name = str(row['name'])
-            confidence = float(row['confidence'])
+        for xmin, ymin, xmax, ymax, confidence, cls in results.xyxy[0].tolist():
+            name = str(names[int(cls)])
+            confidence = float(confidence)
 
             # Class filter: only keep target classes
             if name not in config.TARGET_CLASSES:
@@ -117,10 +137,10 @@ class Detector:
                 continue
 
             # Map coordinates back to original frame
-            x1 = int(row['xmin'] * scale_x) + crop_offset_x
-            y1 = int(row['ymin'] * scale_y) + crop_offset_y
-            x2 = int(row['xmax'] * scale_x) + crop_offset_x
-            y2 = int(row['ymax'] * scale_y) + crop_offset_y
+            x1 = int(xmin * scale_x) + crop_offset_x
+            y1 = int(ymin * scale_y) + crop_offset_y
+            x2 = int(xmax * scale_x) + crop_offset_x
+            y2 = int(ymax * scale_y) + crop_offset_y
 
             detections.append({
                 'name': name,

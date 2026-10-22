@@ -91,6 +91,7 @@ def compute_severity(
     current_time=None,
     sensitivity=1.0,
     is_vehicle=False,
+    is_moving=False,
 ):
     """
     Compute severity level and a transparent list of reasons.
@@ -103,6 +104,7 @@ def compute_severity(
         current_time: datetime or None
         sensitivity: ROI sensitivity weight (default 1.0)
         is_vehicle: True if this detection is a vehicle (bike, car, etc.)
+        is_moving: True if the person's foot point is travelling (walking past)
 
     Returns:
         (severity: str, reasons: list[str])
@@ -110,6 +112,13 @@ def compute_severity(
     # ── Vehicle shortcut: passing vehicles are always LOW ──────────────────
     if is_vehicle:
         return LOW, ["vehicle_passing"]
+
+    behaviour_l = behavior.lower() if behavior else None
+
+    # ── Passer-by mode (video 3): someone walking past is just logged ─────
+    if config.PASSERBY_IS_LOW and (
+            is_moving or behaviour_l in ("walking", "running")):
+        return LOW, ["passerby_walking"]
 
     reasons = []
     severity = LOW
@@ -137,19 +146,26 @@ def compute_severity(
             severity = MEDIUM
         reasons.append(f"dwell>={config.LOW_TO_MEDIUM_SECONDS}s")
 
-    # ── Multi-person escalation ────────────────────────────────────────────
-    if person_count_in_roi >= config.HIGH_PERSON_COUNT:
-        severity = HIGH
-        reasons.append(f"persons_in_roi>={config.HIGH_PERSON_COUNT}")
+    # In passer-by mode only a long stationary dwell escalates: the pose
+    # model misreads people mid-stride (e.g. as crouching), and a couple of
+    # people walking past together is not an intrusion.
+    if not config.PASSERBY_IS_LOW:
+        # ── Multi-person escalation ────────────────────────────────────────
+        if person_count_in_roi >= config.HIGH_PERSON_COUNT:
+            severity = HIGH
+            reasons.append(f"persons_in_roi>={config.HIGH_PERSON_COUNT}")
 
-    # ── Behavior-based escalation ──────────────────────────────────────────
-    suspicious_behaviors = {"crouching", "lying", "fallen", "climbing", "running"}
-    if behavior and behavior.lower() in suspicious_behaviors:
-        severity = HIGH
-        reasons.append(f"pose:{behavior}")
+        # ── Behavior-based escalation ──────────────────────────────────────
+        suspicious_behaviors = {"crouching", "lying", "fallen", "climbing"}
+        if config.RUNNING_RAISES_ALARM:
+            suspicious_behaviors.add("running")
+        if behaviour_l in suspicious_behaviors:
+            severity = HIGH
+            reasons.append(f"pose:{behavior}")
 
     # ── Walking person → at least MEDIUM (unless WALKING_IS_LOW) ─────────
-    if behavior and behavior.lower() in ("standing", "walking"):
+    if behaviour_l in ("standing", "walking") or (
+            behaviour_l == "running" and not config.RUNNING_RAISES_ALARM):
         if severity == LOW and not config.WALKING_IS_LOW:
             severity = MEDIUM
             reasons.append(f"person_walking")

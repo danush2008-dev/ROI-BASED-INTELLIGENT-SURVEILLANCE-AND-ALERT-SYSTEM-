@@ -27,6 +27,8 @@ EVIDENCE_DIR        = "evidence"
 CLIPS_DIR           = os.path.join(EVIDENCE_DIR, "clips")
 EVIDENCE_LOG_PATH   = os.path.join(EVIDENCE_DIR, "evidence_log.jsonl")
 DB_PATH             = "events.db"
+DASHBOARD_DB_PATH   = "dashboard_all.db"   # unified DB the dashboard reads (all videos)
+EMAIL_LOG_PATH      = "email_log.json"     # every email (sent, simulated or dry-run)
 
 # ── Video source ───────────────────────────────────────────────────────────
 DEFAULT_SOURCE      = "input vedio for testing.mp4"
@@ -103,7 +105,15 @@ FEET_CROUCH_RATIO      = 0.9         # F <  this -> crouching, in between -> sit
 USE_MOTION_CUE         = True
 MOVE_WINDOW_SECONDS    = 2.0         # look at the last N seconds of video
 MOVE_MIN_PIXELS        = 12          # net foot-point movement that counts as "moving"
-RUNNING_MIN_PIXELS     = 15          # net foot-point movement that counts as "running"
+RUNNING_MIN_PIXELS     = 15          # (legacy, no longer used - see RUN_SPEED_* below)
+
+# Running = speed of the foot point, measured in body heights per second
+# (bbox heights / s), so it works at any distance from the camera.
+#   walking across the frame ~0.4-0.9, running ~1.5+
+#   climbing stairs normally ~0.2-0.4, running up stairs ~0.6+
+RUN_SPEED_WINDOW_SECONDS = 0.6       # speed is measured over this much video
+RUN_SPEED_BH_PER_S       = 1.2       # >= this -> 'running'  (overridden per video)
+RUNNING_HOLD_SECONDS     = 1.5       # keep the 'running' label this long after the burst
 STAND_ANKLE_RATIO      = 1.4         # (ankle_y - hip_y) / torso >= this -> standing.
                                      #   standing ~1.8-2.2, sitting on chair ~0.8-1.2
 SIT_KNEE_RATIO         = 0.55        # (knee_y - hip_y) / torso < this -> thigh ~horizontal -> sitting
@@ -116,6 +126,10 @@ DEBUG_POSE             = True        # show the pose numbers under each label (s
 
 # ── Per-video behaviour flags (set dynamically by phy.py) ──────────────
 WALKING_IS_LOW         = False       # when True, walking persons stay LOW (for video 3)
+PASSERBY_IS_LOW        = False       # when True, a person walking past (moving) is always
+                                     #   LOW / log-only: pose and head-count escalation are
+                                     #   ignored; only a long stationary dwell escalates (video 3)
+RUNNING_RAISES_ALARM   = True        # 'running' -> HIGH + alarm (video 1: running up the stairs)
 
 # ── Demo mode ─────────────────────────────────────────────────────────────
 DEMO_MODE           = False           # clean overlay for presentation recording

@@ -371,8 +371,10 @@ class EvidenceManager:
         if count >= config.MAX_PHOTOS_PER_INCIDENT:
             return None
 
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"detected_{timestamp}.jpg"
+        # Milliseconds + incident ID keep names unique, so a photo from
+        # this run never overwrites one from this or an earlier run.
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+        filename = f"detected_{timestamp}_id{incident_id}.jpg"
         file_path = os.path.join(self.save_dir, filename)
 
         try:
@@ -460,9 +462,9 @@ class EvidenceManager:
     def get_latest_photo(self):
         """Return the path of the most recently saved photo, or None."""
         try:
-            files = sorted(os.listdir(self.save_dir))
+            files = [os.path.join(self.save_dir, f) for f in os.listdir(self.save_dir)]
             if files:
-                return os.path.join(self.save_dir, files[-1])
+                return max(files, key=os.path.getmtime)
         except Exception:
             pass
         return None
