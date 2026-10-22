@@ -22,8 +22,10 @@ import argparse
 import subprocess
 from datetime import datetime
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(__file__))
+# Add project root to path, and work from the project folder (where phy.py
+# and the dashboard keep their files)
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, PROJECT_DIR)
 
 import config
 from event_db import EventDB
@@ -127,19 +129,23 @@ def run_ablation_profile(profile_name, profile, source, python_exe, db):
 
     flags = profile["flags"]
 
-    # Clean evidence log for this run
-    run_evidence_dir = os.path.join("evidence", f"ablation_{profile_name}")
+    # Every run gets its own label and folder, so earlier results (other
+    # videos, earlier runs) are kept rather than overwritten
+    started = datetime.now()
+    video_tag = os.path.splitext(os.path.basename(source))[0].replace(" ", "_")
+    run_label = f"{profile_name} · {video_tag} @ {started.strftime('%Y-%m-%d %H:%M:%S')}"
+    run_evidence_dir = os.path.join(
+        "evidence", f"ablation_{profile_name}_{video_tag}_{started.strftime('%Y%m%d_%H%M%S')}")
     run_log_path = os.path.join(run_evidence_dir, "evidence_log.jsonl")
     os.makedirs(run_evidence_dir, exist_ok=True)
 
-    # Remove old log if it exists
-    if os.path.exists(run_log_path):
-        os.remove(run_log_path)
-
-    # Build config override JSON
+    # Build config override JSON (photos/clips/log stay in the run's folder,
+    # out of the normal dry-run evidence)
     config_override = dict(flags)
     config_override["EVIDENCE_LOG_PATH"] = run_log_path
+    config_override["EVIDENCE_DIR"] = run_evidence_dir
     config_override["CLIPS_DIR"] = os.path.join(run_evidence_dir, "clips")
+    config_override["DETECTED_PHOTOS_DIR"] = os.path.join(run_evidence_dir, "photos")
     config_json = json.dumps(config_override)
 
     # Run phy.py as subprocess
@@ -159,7 +165,7 @@ def run_ablation_profile(profile_name, profile, source, python_exe, db):
             capture_output=True,
             text=True,
             timeout=600,  # 10 minute timeout
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=PROJECT_DIR,
         )
         wall_seconds = time.time() - start_time
         output = result.stdout + result.stderr
@@ -174,7 +180,7 @@ def run_ablation_profile(profile_name, profile, source, python_exe, db):
     metrics["wall_seconds"] = round(wall_seconds, 2)
 
     # Count frames from output
-    total_frames = _parse_frame_count(output)
+    total_frames = _parse_frame_count(output, source)
     metrics["total_frames"] = total_frames
     if wall_seconds > 0 and total_frames > 0:
         metrics["avg_fps"] = round(total_frames / wall_seconds, 1)
@@ -194,8 +200,8 @@ def run_ablation_profile(profile_name, profile, source, python_exe, db):
 
     # Store in database
     run_data = {
-        "run_label": profile_name,
-        "timestamp": datetime.now().isoformat(),
+        "run_label": run_label,
+        "timestamp": started.isoformat(timespec="seconds"),
         "config": flags,
         "source": source,
         "total_frames": total_frames,
@@ -209,12 +215,12 @@ def run_ablation_profile(profile_name, profile, source, python_exe, db):
         "unique_tracks": metrics.get("unique_tracks", 0),
         "avg_dwell": metrics.get("avg_dwell", 0),
         "max_dwell": metrics.get("max_dwell", 0),
-        "notes": profile["description"],
+        "notes": f"{profile['description']} ({video_tag})",
     }
     db.save_ablation_run(run_data)
 
     # Import events into DB with run label
-    db.import_from_jsonl(run_log_path, run_label=profile_name)
+    db.import_from_jsonl(run_log_path, run_label=run_label)
 
     return run_data
 
@@ -267,14 +273,18 @@ def _parse_evidence_log(log_path):
     return metrics
 
 
-def _parse_frame_count(output):
-    """Try to extract total frame count from phy.py output."""
-    # Look for "Video ended" which means all frames were processed
-    # The frame count can be inferred from the video
-    # For now, return 0 (will be updated if we add --metrics-out)
-    if "Video ended" in output or "frame could not be read" in output:
-        return 819  # known frame count for test video
-    return 0
+def _parse_frame_count(output, source):
+    """Frames processed: the video's frame count if phy.py reached the end."""
+    if "Video ended" not in output and "frame could not be read" not in output:
+        return 0
+    try:
+        import cv2
+        cap = cv2.VideoCapture(source)
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        return max(n, 0)
+    except Exception:
+        return 0
 
 
 def print_comparison_table(db):
@@ -284,20 +294,20 @@ def print_comparison_table(db):
         print("\nNo ablation results found.")
         return
 
-    print(f"\n{'='*100}")
+    print(f"\n{'='*130}")
     print("  ABLATION COMPARISON TABLE")
-    print(f"{'='*100}")
+    print(f"{'='*130}")
 
     # Header
-    header = (f"{'Profile':<14} {'FPS':>6} {'Events':>7} "
+    header = (f"{'Run':<44} {'FPS':>6} {'Events':>7} "
               f"{'LOW':>5} {'MED':>5} {'HIGH':>5} "
               f"{'Tracks':>7} {'AvgDwell':>9} {'MaxDwell':>9} "
               f"{'Time(s)':>8}")
     print(header)
-    print("-" * 100)
+    print("-" * 130)
 
     for run in runs:
-        print(f"{run['run_label']:<14} "
+        print(f"{run['run_label']:<44} "
               f"{run.get('avg_fps', 0):>6.1f} "
               f"{run.get('confirmed_intrusions', 0):>7} "
               f"{run.get('low_count', 0):>5} "
@@ -308,7 +318,7 @@ def print_comparison_table(db):
               f"{run.get('max_dwell', 0):>8.1f}s "
               f"{run.get('wall_seconds', 0):>7.1f}s")
 
-    print("-" * 100)
+    print("-" * 130)
 
     # Find best/worst
     if len(runs) > 1:
@@ -396,6 +406,13 @@ def main():
     )
     args = parser.parse_args()
 
+    # Resolve the video before moving to the project folder
+    if not os.path.exists(args.source) and \
+            os.path.exists(os.path.join(PROJECT_DIR, args.source)):
+        args.source = os.path.join(PROJECT_DIR, args.source)
+    args.source = os.path.abspath(args.source)
+    os.chdir(PROJECT_DIR)
+
     if args.list:
         print("Available ablation profiles:")
         for name, prof in PROFILES.items():
@@ -416,7 +433,7 @@ def main():
         report = generate_markdown_report(db)
         report_path = os.path.join("evidence", "ablation_report.md")
         os.makedirs("evidence", exist_ok=True)
-        with open(report_path, 'w') as f:
+        with open(report_path, 'w', encoding='utf-8') as f:
             f.write(report)
         print(f"\nReport saved to: {report_path}")
         return
@@ -459,7 +476,7 @@ def main():
     # Save markdown report
     report = generate_markdown_report(db)
     report_path = os.path.join("evidence", "ablation_report.md")
-    with open(report_path, 'w') as f:
+    with open(report_path, 'w', encoding='utf-8') as f:
         f.write(report)
     print(f"\nReport saved to: {report_path}")
     print("View in dashboard: python dashboard.py")

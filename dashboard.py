@@ -1284,7 +1284,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                     <div class="icon">🔬</div>
                     <p>No ablation results yet</p>
                     <p style="font-size:0.8rem;margin-top:8px;color:var(--text-muted)">
-                        Run: <code>python ablation.py</code> to generate results
+                        Finish a dry run of a video, or run
+                        <code>python ablation.py --source "video 1.mp4"</code>
                     </p>
                 </div>`;
                 return;
