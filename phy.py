@@ -353,6 +353,8 @@ def main():
 
     # Track IDs confirmed as trusted (skip alerts for these)
     trusted_track_ids = {}  # {incident_id: match_name}
+    trust_clicks = []       # mouse clicks on the video window, not yet handled
+    enrolled_tracks = {}    # {incident_id: [snapshots saved, video time of last]}
 
     # Set tracker frame rate
     tracker.set_frame_rate(video_fps)
@@ -404,6 +406,14 @@ def main():
     # ── Display ────────────────────────────────────────────────────────────
     if not args.headless:
         cv2.namedWindow('Video')
+        if trusted_detector.can_enroll:
+            # Click a person to register them as trusted (from this camera)
+            def _on_click(event, x, y, flags, param):
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    trust_clicks.append((x, y))
+            cv2.setMouseCallback('Video', _on_click)
+            print("[INFO] Click a person in the video window to mark them as a "
+                  "TRUSTABLE PERSON (remembered for future runs).")
     demo_writer = None
 
     # ── Print startup info ─────────────────────────────────────────────────
@@ -668,6 +678,35 @@ def main():
                         trusted_track_ids[t_key] = friendly
                         print(f"[Trusted] ID {t_key} recognised as {friendly} "
                               f"(score {match_conf:.2f})")
+
+            # ── Clicked people become trusted; save camera snapshots ───────
+            while trust_clicks:
+                cx, cy = trust_clicks.pop(0)
+                hits = [d for d in detections
+                        if d['name'] == config.INTRUSION_CLASS
+                        and d['x1'] <= cx <= d['x2'] and d['y1'] <= cy <= d['y2']]
+                if not hits:
+                    print("[Trusted] Click was not on a detected person.")
+                    continue
+                d = min(hits, key=lambda h: (h['x2'] - h['x1']) * (h['y2'] - h['y1']))
+                key = str(d['track_id']) if d.get('track_id') is not None else 'unk'
+                crop = clean_frame[max(0, d['y1']):d['y2'], max(0, d['x1']):d['x2']]
+                path = trusted_detector.add_cctv_reference(crop, config.TRUSTED_CLICK_NAME)
+                trusted_track_ids[key] = config.TRUSTED_CLICK_NAME
+                enrolled_tracks[key] = [1, video_time]
+                print(f"[Trusted] ID {key} marked as TRUSTABLE PERSON "
+                      f"(snapshot saved: {path})")
+            # A few more snapshots (other poses/positions) of clicked people,
+            # one per second, so later runs recognise them more reliably
+            for d in detections:
+                key = str(d.get('track_id'))
+                st = enrolled_tracks.get(key)
+                if (st and st[0] < config.TRUSTED_SNAPSHOTS_PER_RUN
+                        and video_time - st[1] >= 1.0 and not d.get('followed')):
+                    crop = clean_frame[max(0, d['y1']):d['y2'], max(0, d['x1']):d['x2']]
+                    if trusted_detector.add_cctv_reference(crop, config.TRUSTED_CLICK_NAME):
+                        st[0] += 1
+                        st[1] = video_time
 
             # ── First pass: count (non-trusted) persons per ROI ────────────
             persons_per_roi = {roi['name']: 0 for roi in roi_mgr.rois}
@@ -1080,6 +1119,11 @@ def main():
                 confirmer.mark_absent_entities(active_entity_keys)
                 if frame_count % 100 == 0:
                     confirmer.cleanup_stale()
+
+            if not args.headless and trusted_detector.can_enroll:
+                cv2.putText(frame, "Click a person to mark as TRUSTABLE PERSON",
+                            (10, frame.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.45, (0, 200, 0), 1)
 
             # ── FPS overlay ────────────────────────────────────────────────
             cv2.putText(frame, f"FPS: {display_fps:.1f}",
