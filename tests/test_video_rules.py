@@ -184,3 +184,41 @@ class TestEmailLog:
         assert len(data) == 251
         assert data[-1]["source"] == "video_1"
         assert data[-1]["status"] == "dry-run (not sent)"
+
+
+# ── Hand-drawn ROIs ───────────────────────────────────────────────────────
+
+class TestHandDrawnROI:
+
+    SQUARE = [[100, 100], [300, 100], [300, 300], [100, 300]]
+
+    def test_feet_inside(self):
+        from roi_manager import ROIManager
+        m = ROIManager()
+        assert m.box_in_roi({"points": self.SQUARE}, 180, 150, 220, 250, (200, 250))
+
+    def test_body_inside_feet_just_below(self, monkeypatch):
+        # ROI drawn around where the person appears; box bottom hidden
+        # behind a step falls just below the outline
+        from roi_manager import ROIManager
+        monkeypatch.setattr(config, "ROI_MIN_OVERLAP", 0.3)
+        m = ROIManager()
+        assert m.box_in_roi({"points": self.SQUARE}, 180, 220, 220, 320, (200, 320))
+
+    def test_person_well_outside(self):
+        from roi_manager import ROIManager
+        m = ROIManager()
+        assert not m.box_in_roi({"points": self.SQUARE}, 400, 150, 440, 250, (420, 250))
+        # only a sliver of the box touches the ROI
+        assert not m.box_in_roi({"points": self.SQUARE}, 290, 150, 390, 250, (340, 250))
+
+    def test_bow_tie_click_order_is_fixed(self):
+        from roi_manager import ROIManager
+        bow_tie = [[100, 100], [300, 100], [100, 300], [300, 300]]
+        fixed = ROIManager._fix_polygon(bow_tie)
+        assert ROIManager.point_in_polygon((200, 150), fixed)
+        assert ROIManager.point_in_polygon((120, 200), fixed)
+
+    def test_normal_polygon_unchanged(self):
+        from roi_manager import ROIManager
+        assert ROIManager._fix_polygon(self.SQUARE) == self.SQUARE

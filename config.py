@@ -41,6 +41,8 @@ VEHICLE_CLASSES     = ['car', 'bus', 'truck', 'motorcycle']
 
 # ── Feature flags (toggle for ablation) ────────────────────────────────────
 USE_FOOT_POINT             = True     # Phase 2: bottom-center instead of box center
+ROI_MIN_OVERLAP            = 0.3      # a person also counts as in the ROI when this
+                                      #   fraction of their box lies inside it (0 = off)
 USE_CONF_THRESHOLD         = True     # Phase 2: filter low-confidence detections
 USE_TEMPORAL_CONFIRMATION  = True     # Phase 2: N-of-M confirmation
 USE_TRACKING               = True     # Phase 3: ByteTrack persistent IDs

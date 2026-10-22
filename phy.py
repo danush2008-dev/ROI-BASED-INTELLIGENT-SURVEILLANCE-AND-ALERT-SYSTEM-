@@ -350,7 +350,9 @@ def main():
     # ── Print startup info ─────────────────────────────────────────────────
     print(f"\n[INFO] Starting surveillance on source: {source}")
     print(f"[INFO] Headless={args.headless}, DryRun={args.dry_run}")
-    print(f"[INFO] ROIs loaded: {len(roi_mgr.rois)}")
+    print(f"[INFO] ROIs loaded: {len(roi_mgr.rois)} from {config.ROI_JSON_PATH}")
+    for _roi in roi_mgr.rois:
+        print(f"[INFO]   {_roi['name']}: {_roi['points']}")
     print(f"[INFO] Tracking: {config.USE_TRACKING} (ByteTrack)")
     print(f"[INFO] Foot-point: {config.USE_FOOT_POINT}")
     print(f"[INFO] Conf threshold: {config.CONF_THRESHOLD if config.USE_CONF_THRESHOLD else 'off'}")
@@ -439,7 +441,7 @@ def main():
                         continue
                     rx1, ry1, rx2, ry2 = raw['x1'], raw['y1'], raw['x2'], raw['y2']
                     foot = ROIManager.get_foot_point(rx1, ry1, rx2, ry2)
-                    inside = any(ROIManager.point_in_polygon(foot, r["points"])
+                    inside = any(roi_mgr.box_in_roi(r, rx1, ry1, rx2, ry2, foot)
                                  for r in roi_mgr.rois)
                     colour = (0, 165, 255) if inside else (255, 255, 0)
                     cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), colour, 3 if inside else 1)
@@ -527,7 +529,7 @@ def main():
                 else:
                     tp = ROIManager.get_center_point(x1, y1, x2, y2)
                 for roi in roi_mgr.rois:
-                    if ROIManager.point_in_polygon(tp, roi["points"]):
+                    if roi_mgr.box_in_roi(roi, x1, y1, x2, y2, tp):
                         persons_per_roi[roi['name']] += 1
 
             # ── Second pass: process each detection ────────────────────────
@@ -588,7 +590,7 @@ def main():
                     person_name = trusted_track_ids[cur_incident_id]
                     trusted_roi = next(
                         (r for r in roi_mgr.rois
-                         if ROIManager.point_in_polygon(test_point, r["points"])), None)
+                         if roi_mgr.box_in_roi(r, x1, y1, x2, y2, test_point)), None)
                     trust_label = f"TRUSTED - {person_name}"
                     if trusted_roi is not None:
                         trust_label += " | LOW"
@@ -612,7 +614,10 @@ def main():
 
                 # ── ROI check for each ROI ─────────────────────────────────
                 for roi in roi_mgr.rois:
-                    in_roi = ROIManager.point_in_polygon(test_point, roi["points"])
+                    if name == config.INTRUSION_CLASS:
+                        in_roi = roi_mgr.box_in_roi(roi, x1, y1, x2, y2, test_point)
+                    else:
+                        in_roi = ROIManager.point_in_polygon(test_point, roi["points"])
 
                     # ── Entity key for confirmation ────────────────────────
                     if config.USE_TRACKING and track_id is not None:
