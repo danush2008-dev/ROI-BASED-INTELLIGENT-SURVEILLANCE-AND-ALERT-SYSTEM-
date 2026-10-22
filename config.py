@@ -71,9 +71,13 @@ TRACK_ACTIVATION_CONF = 0.4           # ByteTrack: a new track needs > this + 0.
 TRACK_LOST_BUFFER = 60                # frames a lost track is remembered (re-use its ID)
 
 # ── Display hold-over for brief detector dropouts ──────────────────────────
-BOX_HOLD_SECONDS     = 1.0            # keep drawing a lost person's last box this long
-OCCLUDED_HOLD_SECONDS = 4.0           # ...but this long if they were last seen inside
-                                      #   the ROI (most likely hidden by a railing / gate)
+FOLLOW_LOST_PERSONS  = True           # when YOLO misses a person in/near the ROI, move
+                                      #   their box with them by following their image
+FOLLOW_MAX_SECONDS   = 5.0            # ...for at most this long without a detection
+FOLLOW_MIN_SIMILARITY = 0.3           # stop following when the box no longer looks
+                                      #   like the person (0-1)
+BOX_HOLD_SECONDS     = 0.2            # if even that fails, keep the last box this long
+                                      #   (just enough to avoid flicker)
 BANNER_HOLD_SECONDS  = 2.0            # keep the top-left severity banner this long
 CONFIRM_HOLD_SECONDS = 4.0            # a confirmed person stays confirmed through
                                       #   brief detection gaps

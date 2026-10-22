@@ -43,6 +43,8 @@ from tracker import Tracker, DwellTracker
 from pose_estimator import PoseEstimator, update_motion, foot_speed
 from event_db import EventDB
 from trusted_person import TrustedPersonDetector
+from follow import (follow_box, appearance, similarity, make_anchor,
+                    BackgroundModel)
 import severity as sev
 
 
@@ -121,6 +123,12 @@ def _draw_status(frame, severity, reasons, dwell):
                       (mx + mw + 10, frame.shape[0] - 30), (0, 0, 255), -1)
         cv2.putText(frame, msg, (mx, frame.shape[0] - 38),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+
+def _overlaps_rect(box, rect):
+    """Does box (x1, y1, x2, y2) overlap rect (x, y, w, h)?"""
+    x, y, w, h = rect
+    return box[2] > x and box[0] < x + w and box[3] > y and box[1] < y + h
 
 
 def _merge_detections(primary, extra):
@@ -347,6 +355,9 @@ def main():
     id_alias = {}               # {new ByteTrack ID: earlier ID of the same person}
     known_track_ids = set()     # raw ByteTrack IDs already seen
     zoom_active_until = -1.0    # video time until which the ROI zoom pass runs
+    prev_gray = None            # previous frame (grayscale) for following people
+    prev_fg = None              # ...and its foreground (moving pixels) mask
+    bg_model = BackgroundModel()
     last_status = None          # ((severity, reasons, dwell), video_time) for the banner
     ALARM_COOLDOWN_SECONDS = 5
     last_alarm_time = None
@@ -503,6 +514,52 @@ def main():
                 detections = []
                 raw_detections = []
 
+            # ── Follow people the detector missed this frame ───────────────
+            # A person who was in/near the ROI a frame ago but isn't detected
+            # now (too small, behind the railing/gate) is followed visually,
+            # so their box keeps moving WITH them. The followed box goes
+            # through the normal pipeline (ROI, severity, dwell, banner)
+            # until YOLO finds them again (same ID, see re-identification).
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            fg = bg_model.update(gray) if config.FOLLOW_LOST_PERSONS else None
+            if (use_tracker and config.FOLLOW_LOST_PERSONS and run_detection
+                    and prev_gray is not None):
+                detections = list(detections)
+                present = {d.get('track_id') for d in detections}
+                fh_, fw_ = frame.shape[:2]
+                for tid, info in track_last_seen.items():
+                    if (tid in present or info['name'] != config.INTRUSION_CLASS
+                            or video_time - info['t'] > 1.5 / video_fps  # not followed last frame
+                            or video_time - info['detected_t'] > config.FOLLOW_MAX_SECONDS):
+                        continue
+                    if info['thick'] <= 1 and not (            # only in/near the ROI
+                            roi_bounds is not None and _overlaps_rect(info['box'], roi_bounds)):
+                        continue
+                    found = follow_box(prev_gray, gray, info['fbox'], info['vel'],
+                                       prev_fg=prev_fg, anchor=info['anchor'], fg=fg)
+                    if found is None:
+                        continue
+                    fbox, method = found
+                    box = tuple(int(round(v)) for v in fbox)
+                    # Found only frame-to-frame (not matched to the person's
+                    # detected look)? Check it still looks like them, or the box
+                    # could drift onto the background - then stop following.
+                    if method != "anchor" and similarity(
+                            appearance(gray, box), info['look']) < config.FOLLOW_MIN_SIMILARITY:
+                        continue
+                    bx1, by1, bx2, by2 = box
+                    if bx2 <= 0 or by2 <= 0 or bx1 >= fw_ or by1 >= fh_:
+                        continue                    # walked out of the picture
+                    fdet = {'name': info['name'], 'x1': bx1, 'y1': by1,
+                            'x2': bx2, 'y2': by2, 'confidence': 0.0,
+                            'track_id': tid, 'followed': True, 'fbox': fbox}
+                    if any(_iou(fdet, d) > 0.5 for d in detections
+                           if d['name'] == info['name']):
+                        continue                    # someone detected there already
+                    detections.append(fdet)
+            prev_gray = gray
+            prev_fg = fg
+
             # ── Push frame to clip recorder circular buffer ────────────────
             clip_done = evidence_mgr.push_frame(frame)
             if clip_done:
@@ -619,10 +676,30 @@ def main():
                 cv2.putText(frame, " ".join(label_parts), (x1, y1 - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, default_color, 1)
                 if track_id is not None:
+                    old = track_last_seen.get(track_id)
+                    if old is not None and old.get('followed') and not det.get('followed'):
+                        # Detected again after being followed: the followed
+                        # positions were approximate, so don't let the small
+                        # correction count as movement (false "running")
+                        track_foot_hist.pop(str(track_id), None)
+                    vel = (0.0, 0.0)
+                    if old is not None:
+                        n_frames = max(1, round((video_time - old['t']) * video_fps))
+                        ox1, oy1, ox2, oy2 = old['box']
+                        vel = (((x1 + x2) - (ox1 + ox2)) / 2 / n_frames,
+                               ((y1 + y2) - (oy1 + oy2)) / 2 / n_frames)
                     track_last_seen[track_id] = {
                         't': video_time, 'box': (x1, y1, x2, y2), 'name': name,
                         'colour': default_color, 'label': " ".join(label_parts),
-                        'thick': 1, 'trusted': None, 'in_roi': False, 'alert': None}
+                        'thick': 1, 'trusted': None, 'vel': vel,
+                        'fbox': det.get('fbox', (x1, y1, x2, y2)),
+                        'followed': bool(det.get('followed')),
+                        'detected_t': (old['detected_t'] if det.get('followed') and old
+                                       else video_time),
+                        'look': (old['look'] if det.get('followed') and old
+                                 else appearance(gray, (x1, y1, x2, y2))),
+                        'anchor': (old['anchor'] if det.get('followed') and old
+                                   else make_anchor(gray, fg, (x1, y1, x2, y2)))}
 
                 # Draw test point
                 if config.USE_FOOT_POINT and name == config.INTRUSION_CLASS:
@@ -663,12 +740,10 @@ def main():
                     if track_id is not None:
                         track_last_seen[track_id].update(
                             colour=(0, 200, 0), label=trust_label, thick=3,
-                            trusted=person_name, in_roi=trusted_roi is not None)
+                            trusted=person_name)
                     if trusted_roi is not None:
                         reasons = [f"trusted_person:{person_name}"]
                         frame_alerts.append((sev.LOW, reasons, None))
-                        if track_id is not None:
-                            track_last_seen[track_id]['alert'] = (sev.LOW, reasons, None)
                         frame_events.append(dict(
                             incident_id=cur_incident_id, severity=sev.LOW,
                             reasons=reasons, dwell_seconds=0.0, behaviour=None,
@@ -712,8 +787,7 @@ def main():
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
                             if track_id is not None:
                                 track_last_seen[track_id].update(
-                                    colour=(0, 255, 255), label=unconf_label, thick=2,
-                                    in_roi=True)
+                                    colour=(0, 255, 255), label=unconf_label, thick=2)
                             # Update dwell even when unconfirmed (for accurate timing)
                             if config.USE_TRACKING and track_id is not None:
                                 dwell_tracker.update(track_id, roi['name'], in_roi, video_time)
@@ -833,9 +907,6 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, pose_color, 2)
 
                     frame_alerts.append((cur_severity, reasons, dwell_s))
-                    if track_id is not None:
-                        track_last_seen[track_id].update(
-                            in_roi=True, alert=(cur_severity, reasons, dwell_s))
 
                     # ── Track this as a confirmed intruder ─────────────────
                     confirmed_intruder_ids.add(incident_id)
@@ -862,8 +933,7 @@ def main():
                                         severity_color, 3)
                         if track_id is not None:
                             track_last_seen[track_id].update(
-                                colour=severity_color, label=overlay_label,
-                                alert=(cur_severity, reasons, dwell_s))
+                                colour=severity_color, label=overlay_label)
                         frame_alerts[-1] = (cur_severity, reasons, dwell_s)
 
                     frame_events.append(dict(
@@ -877,34 +947,17 @@ def main():
 
                     break  # one detection per ROI is enough
 
-            # ── Keep showing people the detector briefly lost ──────────────
-            # (occluded by the railing / gate, motion blur) at their last box
-            # A person last seen INSIDE the ROI (not at the frame edge, i.e.
-            # not walking out of the picture) is held longer: they are most
-            # likely still there, hidden. Their severity and dwell stay up.
-            fh_, fw_ = frame.shape[:2]
+            # ── Keep showing people the detector AND the follower lost ─────
+            # for a moment at their last box (avoids flicker)
             for tid in list(track_last_seen):
                 info = track_last_seen[tid]
                 age = video_time - info['t']
-                if age > max(config.BOX_HOLD_SECONDS, config.OCCLUDED_HOLD_SECONDS,
-                             config.REID_SECONDS):
+                if age > max(config.BOX_HOLD_SECONDS, config.REID_SECONDS):
                     del track_last_seen[tid]
                     continue
-                if tid in seen_track_ids or info['thick'] <= 1:
+                if tid in seen_track_ids or info['thick'] <= 1 or age > config.BOX_HOLD_SECONDS:
                     continue
-                bx1, by1, bx2, by2 = info['box']
-                at_edge = bx1 <= 4 or by1 <= 4 or bx2 >= fw_ - 4 or by2 >= fh_ - 4
-                hold = (config.OCCLUDED_HOLD_SECONDS
-                        if info.get('in_roi') and not at_edge
-                        else config.BOX_HOLD_SECONDS)
-                if age > hold:
-                    continue
-                label = info['label'] + (" (hidden)" if info.get('in_roi') else "")
-                _draw_box_label(frame, info['box'], label, info['colour'], 2)
-                if info.get('alert'):
-                    a_sev, a_reasons, a_dwell = info['alert']
-                    frame_alerts.append((a_sev, a_reasons,
-                                         None if a_dwell is None else a_dwell + age))
+                _draw_box_label(frame, info['box'], info['label'], info['colour'], 2)
 
             # ── Top-left status: severity, reasons and dwell ───────────────
             # Held for a moment after the person was last confirmed, so it
