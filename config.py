@@ -71,13 +71,15 @@ TRACK_ACTIVATION_CONF = 0.4           # ByteTrack: a new track needs > this + 0.
 TRACK_LOST_BUFFER = 60                # frames a lost track is remembered (re-use its ID)
 
 # ── Display hold-over for brief detector dropouts ──────────────────────────
-FOLLOW_LOST_PERSONS  = True           # when YOLO misses a person in/near the ROI, move
-                                      #   their box with them by following their image
+FOLLOW_LOST_PERSONS  = False          # experimental: when YOLO misses a person in/near
+                                      #   the ROI, move their box by following their image.
+                                      #   Off: on real footage it can latch onto a moving
+                                      #   door/gate after the person has gone behind it
 FOLLOW_MAX_SECONDS   = 5.0            # ...for at most this long without a detection
 FOLLOW_MIN_SIMILARITY = 0.3           # stop following when the box no longer looks
                                       #   like the person (0-1)
-BOX_HOLD_SECONDS     = 0.2            # if even that fails, keep the last box this long
-                                      #   (just enough to avoid flicker)
+BOX_HOLD_SECONDS     = 0.5            # keep a lost person's last box this long, then
+                                      #   remove it (avoids flicker, never "stuck")
 BANNER_HOLD_SECONDS  = 2.0            # keep the top-left severity banner this long
 CONFIRM_HOLD_SECONDS = 4.0            # a confirmed person stays confirmed through
                                       #   brief detection gaps
@@ -144,6 +146,8 @@ RUNNING_MIN_PIXELS     = 15          # (legacy, no longer used - see RUN_SPEED_*
 RUN_SPEED_WINDOW_SECONDS = 0.6       # speed is measured over this much video
 RUN_SPEED_BH_PER_S       = 1.2       # >= this -> 'running'  (overridden per video)
 RUNNING_HOLD_SECONDS     = 1.5       # keep the 'running' label this long after the burst
+BOX_JUMP_RATIO           = 0.25      # box height changing more than this between frames
+                                     #   = partly hidden person, not movement
 STAND_ANKLE_RATIO      = 1.4         # (ankle_y - hip_y) / torso >= this -> standing.
                                      #   standing ~1.8-2.2, sitting on chair ~0.8-1.2
 SIT_KNEE_RATIO         = 0.55        # (knee_y - hip_y) / torso < this -> thigh ~horizontal -> sitting
@@ -159,7 +163,8 @@ WALKING_IS_LOW         = False       # when True, walking persons stay LOW (for 
 PASSERBY_IS_LOW        = False       # when True, a person walking past (moving) is always
                                      #   LOW / log-only: pose and head-count escalation are
                                      #   ignored; only a long stationary dwell escalates (video 3)
-RUNNING_RAISES_ALARM   = True        # 'running' -> HIGH + alarm (video 1: running up the stairs)
+RUNNING_RAISES_ALARM   = False       # 'running' -> HIGH + alarm (turned on for video 1:
+                                     #   running up the stairs)
 
 # ── Demo mode ─────────────────────────────────────────────────────────────
 DEMO_MODE           = False           # clean overlay for presentation recording

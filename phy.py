@@ -131,17 +131,37 @@ def _overlaps_rect(box, rect):
     return box[2] > x and box[0] < x + w and box[3] > y and box[1] < y + h
 
 
-def _merge_detections(primary, extra):
-    """Add detections from the zoom pass that the full-frame pass missed."""
+def _merge_detections(primary, extra, crop, frame_shape):
+    """
+    Add people from the zoom pass that the full-frame pass missed.
+
+    A zoom box cut off by the edge of the zoomed area is only part of a
+    person, and one overlapping a full-frame box is the same person again;
+    adding either would leave a second, wrong box that can linger.
+    """
+    cx, cy, cw, ch = crop
+    fh, fw = frame_shape[:2]
     merged = list(primary)
     for e in extra:
-        dup = next((i for i, p in enumerate(merged)
-                    if p['name'] == e['name'] and _iou(p, e) > 0.4), None)
-        if dup is None:
-            merged.append(e)
-        elif e['confidence'] > merged[dup]['confidence']:
-            merged[dup] = e
+        cut_off = ((e['x1'] <= cx + 2 and cx > 0) or (e['y1'] <= cy + 2 and cy > 0)
+                   or (e['x2'] >= cx + cw - 2 and cx + cw < fw)
+                   or (e['y2'] >= cy + ch - 2 and cy + ch < fh))
+        if cut_off:
+            continue
+        if any(p['name'] == e['name'] and (_iou(p, e) > 0.1 or _inside(e, p) > 0.6)
+               for p in primary):
+            continue
+        merged.append(e)
     return merged
+
+
+def _inside(a, b):
+    """Fraction of box a that lies inside box b."""
+    ix1, iy1 = max(a['x1'], b['x1']), max(a['y1'], b['y1'])
+    ix2, iy2 = min(a['x2'], b['x2']), min(a['y2'], b['y2'])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area = max(1, (a['x2'] - a['x1']) * (a['y2'] - a['y1']))
+    return inter / area
 
 
 def _iou(a, b):
@@ -349,6 +369,7 @@ def main():
     track_pose_debug = {}       # {incident_id: debug string}
     track_foot_hist = {}        # {incident_id: deque of (time, x, y) foot points}
     track_running_until = {}    # {incident_id: video time until which 'running' holds}
+    track_box_height = {}       # {incident_id: box height last frame}
     track_last_seen = {}        # {track_id: last box/label/colour, for brief dropouts}
     track_max_reasons = {}      # {incident_id: reasons behind its highest severity}
     confirmed_until = {}        # {entity_key: video time its confirmation is held}
@@ -453,7 +474,8 @@ def main():
                                                 crop=zoom_rect)
                     all_detections = _merge_detections(
                         all_detections,
-                        [d for d in zoom_dets if d['name'] == config.INTRUSION_CLASS])
+                        [d for d in zoom_dets if d['name'] == config.INTRUSION_CLASS],
+                        zoom_rect, frame.shape)
                 if zoom_rect is not None:
                     zx, zy, zw, zh = zoom_rect
                     if any(d['name'] == config.INTRUSION_CLASS
@@ -565,6 +587,12 @@ def main():
             if clip_done:
                 print(f"[Main] Clip finalized: {clip_done}")
 
+            # Untouched copy for the checks that look at the person's pixels
+            # (trusted face/body match, posture): the ROI shading and boxes
+            # drawn below would change their colours - e.g. a hand-drawn ROI
+            # covering the person made the uncle unrecognisable
+            clean_frame = frame.copy()
+
             # ── Draw ROIs first so every bounding box is drawn on top ─────
             if len(roi_mgr.rois) > 0:
                 roi_mgr.draw_rois_on_frame(frame)
@@ -597,6 +625,13 @@ def main():
                 """Foot-point motion for one person, updated once per frame."""
                 if key in motion_cache:
                     return motion_cache[key]
+                # Box suddenly much taller/shorter = the person became partly
+                # hidden (or visible again), so the box bottom jumped: that is
+                # not movement - start measuring afresh, or it reads as running
+                last_h = track_box_height.get(key)
+                track_box_height[key] = box_h
+                if last_h and abs(box_h - last_h) > config.BOX_JUMP_RATIO * last_h:
+                    track_foot_hist.pop(key, None)
                 fh = track_foot_hist.setdefault(key, deque())
                 move_px = update_motion(fh, video_time, foot[0], foot[1])
                 speed_bh = foot_speed(fh, video_time, box_h)
@@ -622,7 +657,7 @@ def main():
                 x1, y1, x2, y2 = det['x1'], det['y1'], det['x2'], det['y2']
                 if frame_count % 2 == 0:  # check every 2nd frame
                     is_trusted, match_name, match_conf = (
-                        trusted_detector.is_trusted(frame, x1, y1, x2, y2)
+                        trusted_detector.is_trusted(clean_frame, x1, y1, x2, y2)
                     )
                     if is_trusted:
                         # Derive friendly name from filename (e.g. "uncle.jpeg" -> "Uncle")
@@ -830,7 +865,7 @@ def main():
                     )
                     if run_pose:
                         behaviour, pose_landmarks = pose_estimator.classify(
-                            frame, x1, y1, x2, y2
+                            clean_frame, x1, y1, x2, y2
                         )
                         # A person walking across the room is not sitting
                         moved_override = False
