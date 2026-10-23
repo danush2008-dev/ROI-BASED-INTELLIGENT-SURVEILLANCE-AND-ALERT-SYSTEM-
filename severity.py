@@ -116,8 +116,13 @@ def compute_severity(
     behaviour_l = behavior.lower() if behavior else None
 
     # ── Passer-by mode (video 3): someone walking past is just logged ─────
+    #    ...unless they keep walking about in the ROI for a long time
+    #    (PASSERBY_MEDIUM_SECONDS, video 3): then MEDIUM
     if config.PASSERBY_IS_LOW and (
             is_moving or behaviour_l in ("walking", "running")):
+        if (config.PASSERBY_MEDIUM_SECONDS is not None
+                and dwell_seconds >= config.PASSERBY_MEDIUM_SECONDS):
+            return MEDIUM, [f"passerby_dwell>={config.PASSERBY_MEDIUM_SECONDS:g}s"]
         return LOW, ["passerby_walking"]
 
     reasons = []
@@ -145,6 +150,13 @@ def compute_severity(
         if severity != HIGH:
             severity = MEDIUM
         reasons.append(f"dwell>={config.LOW_TO_MEDIUM_SECONDS}s")
+
+    # Passer-by mode (video 3): in the ROI long enough -> at least MEDIUM,
+    # also while they stand still for a moment
+    if (config.PASSERBY_IS_LOW and config.PASSERBY_MEDIUM_SECONDS is not None
+            and dwell_seconds >= config.PASSERBY_MEDIUM_SECONDS and severity == LOW):
+        severity = MEDIUM
+        reasons.append(f"passerby_dwell>={config.PASSERBY_MEDIUM_SECONDS:g}s")
 
     # In passer-by mode only a long stationary dwell escalates: the pose
     # model misreads people mid-stride (e.g. as crouching), and a couple of

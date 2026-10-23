@@ -276,9 +276,11 @@ def main():
             set_default("USE_TRUSTED_PERSONS", False)
             set_default("WALKING_IS_LOW", True)
             set_default("PASSERBY_IS_LOW", True)
+            set_default("PASSERBY_MEDIUM_SECONDS", 5.0)
             set_default("RUNNING_RAISES_ALARM", False)
             print("[INFO] Video 3: Vehicle alerts ENABLED (LOW).")
-            print("[INFO] Video 3: Person walking past -> LOW (log only, no email/alarm).")
+            print("[INFO] Video 3: Person walking past -> LOW (log only, no email/alarm); "
+                  f"walking in the ROI for {config.PASSERBY_MEDIUM_SECONDS:g}s+ -> MEDIUM.")
             print("[INFO] Video 3: Trusted person detection DISABLED.")
 
     # ── Open video capture ─────────────────────────────────────────────────

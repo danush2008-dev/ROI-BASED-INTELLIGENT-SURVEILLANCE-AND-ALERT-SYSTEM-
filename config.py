@@ -169,6 +169,8 @@ WALKING_IS_LOW         = False       # when True, walking persons stay LOW (for 
 PASSERBY_IS_LOW        = False       # when True, a person walking past (moving) is always
                                      #   LOW / log-only: pose and head-count escalation are
                                      #   ignored; only a long stationary dwell escalates (video 3)
+PASSERBY_MEDIUM_SECONDS = None       # passer-by mode: someone walking in the ROI this
+                                     #   long (s) becomes MEDIUM (5 for video 3); None = never
 RUNNING_RAISES_ALARM   = False       # 'running' -> HIGH + alarm (turned on for video 1:
                                      #   running up the stairs)
 

@@ -234,3 +234,37 @@ def test_sync_after_log_deleted_and_recreated(tmp_path):
     _write(log, [_rec(i, "HIGH") for i in range(20)])    # new run, longer log
     assert db.sync_from_jsonl(log, "v") == 20
     assert db.get_event_count("v") == 30                 # old events kept too
+
+
+# ── Video 3: someone walking in the ROI for 5 s+ becomes MEDIUM ───────────
+
+class TestVideo3LongWalker:
+
+    def _video3(self, mp):
+        mp.setattr(config, "WALKING_IS_LOW", True)
+        mp.setattr(config, "PASSERBY_IS_LOW", True)
+        mp.setattr(config, "RUNNING_RAISES_ALARM", False)
+        mp.setattr(config, "PASSERBY_MEDIUM_SECONDS", 5.0)
+
+    def test_short_walk_stays_low(self, video_flags):
+        self._video3(video_flags)
+        assert sev.compute_severity(4.9, 1, behavior="walking", is_moving=True)[0] == sev.LOW
+
+    def test_walking_over_5s_is_medium(self, video_flags):
+        self._video3(video_flags)
+        level, reasons = sev.compute_severity(5.0, 1, behavior="walking", is_moving=True)
+        assert level == sev.MEDIUM and reasons == ["passerby_dwell>=5s"]
+        assert sev.should_send_email(level) and not sev.should_play_alarm(level)
+
+    def test_pausing_after_5s_stays_medium(self, video_flags):
+        self._video3(video_flags)
+        assert sev.compute_severity(6.0, 1, behavior="standing")[0] == sev.MEDIUM
+
+    def test_bikes_stay_low(self, video_flags):
+        self._video3(video_flags)
+        assert sev.compute_severity(20.0, 1, is_vehicle=True)[0] == sev.LOW
+
+    def test_off_for_other_videos(self, video_flags):
+        video_flags.setattr(config, "PASSERBY_MEDIUM_SECONDS", None)
+        video_flags.setattr(config, "PASSERBY_IS_LOW", True)
+        assert sev.compute_severity(8.0, 1, behavior="walking", is_moving=True)[0] == sev.LOW
