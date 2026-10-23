@@ -355,24 +355,28 @@ class EvidenceManager:
             return self._clip_recorder.push_frame(frame)
         return None
 
-    def save_photo(self, frame, incident_id="global"):
+    def save_photo(self, frame, incident_id="global", force=False):
         """
         Save an evidence photo for the given incident.
 
         Args:
             frame: BGR image to save
             incident_id: unique identifier for the incident (e.g. track ID)
+            force: save even if the per-incident limit is reached
+                   (used for severity escalations)
 
         Returns:
             The file path if saved, None if limit reached.
         """
         # Check per-incident limit
         count = self._photo_counts.get(incident_id, 0)
-        if count >= config.MAX_PHOTOS_PER_INCIDENT:
+        if count >= config.MAX_PHOTOS_PER_INCIDENT and not force:
             return None
 
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"detected_{timestamp}.jpg"
+        # Milliseconds + incident ID keep names unique, so a photo from
+        # this run never overwrites one from this or an earlier run.
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")[:-3]
+        filename = f"detected_{timestamp}_id{incident_id}.jpg"
         file_path = os.path.join(self.save_dir, filename)
 
         try:
@@ -460,9 +464,9 @@ class EvidenceManager:
     def get_latest_photo(self):
         """Return the path of the most recently saved photo, or None."""
         try:
-            files = sorted(os.listdir(self.save_dir))
+            files = [os.path.join(self.save_dir, f) for f in os.listdir(self.save_dir)]
             if files:
-                return os.path.join(self.save_dir, files[-1])
+                return max(files, key=os.path.getmtime)
         except Exception:
             pass
         return None

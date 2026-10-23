@@ -54,6 +54,33 @@ def update_motion(history, t, x, y, window_s=None):
     return math.hypot(x - history[0][1], y - history[0][2])
 
 
+def foot_speed(history, t, body_h, window_s=None):
+    """
+    How fast a person is moving, in body heights per second.
+
+    history: the same per-person deque that update_motion() fills (call
+    update_motion first for this frame).  Uses only the last window_s seconds
+    so a short sprint shows up quickly.  Dividing by the bounding-box height
+    makes the number independent of how far the person is from the camera.
+    Returns 0.0 until at least half a window of history exists.
+    """
+    window_s = window_s or config.RUN_SPEED_WINDOW_SECONDS
+    if not history or body_h <= 0:
+        return 0.0
+    t_now, x_now, y_now = history[-1]
+    start = None
+    for sample in history:
+        if t_now - sample[0] <= window_s:
+            start = sample
+            break
+    if start is None:
+        return 0.0
+    dt = t_now - start[0]
+    if dt < 0.5 * window_s:
+        return 0.0
+    return math.hypot(x_now - start[1], y_now - start[2]) / dt / body_h
+
+
 class PoseEstimator:
     """
     MediaPipe Pose wrapper for behaviour classification.

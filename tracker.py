@@ -117,8 +117,8 @@ class Tracker:
 
         if self._enabled:
             self._tracker = sv.ByteTrack(
-                track_activation_threshold=0.25,
-                lost_track_buffer=30,
+                track_activation_threshold=config.TRACK_ACTIVATION_CONF,
+                lost_track_buffer=config.TRACK_LOST_BUFFER,
                 minimum_matching_threshold=0.8,
                 frame_rate=30,
             )

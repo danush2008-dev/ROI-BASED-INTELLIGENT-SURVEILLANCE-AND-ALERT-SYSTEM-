@@ -31,13 +31,30 @@ class Detector:
         """
         local_weights = os.path.join(os.path.dirname(__file__), "yolov5s.pt")
 
+        # Fast path: torch.hub.load('ultralytics/yolov5', ...) contacts
+        # GitHub on every start even when the code is already cached, which
+        # makes startup slow. Load the cached copy directly when it exists.
+        cached_repo = os.path.join(torch.hub.get_dir(), "ultralytics_yolov5_master")
+        if os.path.isdir(cached_repo):
+            try:
+                self.model = torch.hub.load(
+                    cached_repo, 'yolov5s', source='local',
+                    pretrained=True, verbose=False
+                )
+                print("[Detector] YOLOv5s loaded from local hub cache.")
+            except Exception as e:
+                print(f"[Detector] Local hub cache load failed ({e}), "
+                      f"falling back to torch hub...")
+                self.model = None
+
         try:
-            # Try loading from hub (will use cache if available)
-            self.model = torch.hub.load(
-                'ultralytics/yolov5', 'yolov5s', pretrained=True,
-                verbose=False, trust_repo=True
-            )
-            print("[Detector] YOLOv5s loaded from torch hub.")
+            if self.model is None:
+                # Try loading from hub (will use cache if available)
+                self.model = torch.hub.load(
+                    'ultralytics/yolov5', 'yolov5s', pretrained=True,
+                    verbose=False, trust_repo=True
+                )
+                print("[Detector] YOLOv5s loaded from torch hub.")
         except Exception as e:
             print(f"[Detector] Hub load failed ({e}), trying local weights...")
             if os.path.exists(local_weights):
@@ -55,17 +72,24 @@ class Detector:
                     f"Cannot load YOLOv5 model and local weights not found at {local_weights}"
                 ) from e
 
-        # Configure model
-        self.model.conf = config.CONF_THRESHOLD if config.USE_CONF_THRESHOLD else 0.25
+        # Configure model (low NMS floor; detect() applies the real threshold)
+        base_conf = config.CONF_THRESHOLD if config.USE_CONF_THRESHOLD else 0.25
+        self._base_conf = base_conf
+        self.model.conf = min(base_conf, config.TRACK_LOW_CONF)
         self.model.classes = None  # we filter manually for flexibility
 
-    def detect(self, frame, roi_bounds=None):
+    def detect(self, frame, roi_bounds=None, min_conf=None, crop=None):
         """
         Run YOLO inference on a frame.
 
         Args:
             frame: BGR image (numpy array)
             roi_bounds: optional (x, y, w, h) tuple to crop before inference
+            min_conf: keep detections down to this confidence instead of
+                      CONF_THRESHOLD (the tracker uses weak boxes to keep
+                      existing tracks alive)
+            crop: optional (x, y, w, h) area to detect in, enlarged to the
+                  inference size (zoom pass for small people in the ROI)
 
         Returns:
             List of detection dicts: {name, x1, y1, x2, y2, confidence}
@@ -76,8 +100,10 @@ class Detector:
         inference_frame = frame
 
         # Optional: crop to ROI bounding rectangle
-        if config.CROP_TO_ROI_BOUNDS and roi_bounds is not None:
-            rx, ry, rw, rh = roi_bounds
+        if crop is None and config.CROP_TO_ROI_BOUNDS:
+            crop = roi_bounds
+        if crop is not None:
+            rx, ry, rw, rh = crop
             fh, fw = frame.shape[:2]
             # Clamp to frame bounds
             rx = max(0, rx)
@@ -102,25 +128,33 @@ class Detector:
 
         # Run inference
         results = self.model(resized)
+        names = results.names
 
+        # Read the raw tensor (x1, y1, x2, y2, conf, cls) - building a pandas
+        # DataFrame every frame is much slower
         detections = []
-        for _, row in results.pandas().xyxy[0].iterrows():
-            name = str(row['name'])
-            confidence = float(row['confidence'])
+        for xmin, ymin, xmax, ymax, confidence, cls in results.xyxy[0].tolist():
+            name = str(names[int(cls)])
+            confidence = float(confidence)
 
             # Class filter: only keep target classes
             if name not in config.TARGET_CLASSES:
                 continue
 
             # Confidence filter
-            if config.USE_CONF_THRESHOLD and confidence < config.CONF_THRESHOLD:
+            if min_conf is not None:
+                if confidence < min_conf:
+                    continue
+            elif config.USE_CONF_THRESHOLD and confidence < config.CONF_THRESHOLD:
+                continue
+            elif confidence < self._base_conf:
                 continue
 
             # Map coordinates back to original frame
-            x1 = int(row['xmin'] * scale_x) + crop_offset_x
-            y1 = int(row['ymin'] * scale_y) + crop_offset_y
-            x2 = int(row['xmax'] * scale_x) + crop_offset_x
-            y2 = int(row['ymax'] * scale_y) + crop_offset_y
+            x1 = int(xmin * scale_x) + crop_offset_x
+            y1 = int(ymin * scale_y) + crop_offset_y
+            x2 = int(xmax * scale_x) + crop_offset_x
+            y2 = int(ymax * scale_y) + crop_offset_y
 
             detections.append({
                 'name': name,

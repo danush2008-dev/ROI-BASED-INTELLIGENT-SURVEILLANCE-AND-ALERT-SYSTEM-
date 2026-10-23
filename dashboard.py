@@ -19,18 +19,24 @@ Usage:
 import os
 import sys
 import json
+import glob
+import time
 import argparse
+import threading
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Read evidence / photos / logs from the project folder (where phy.py writes
+# them), whichever folder the dashboard was started from.
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from flask import Flask, jsonify, send_from_directory, render_template_string
+    from flask import Flask, jsonify, request, send_from_directory, render_template_string
 except ImportError:
     print("[Dashboard] Flask not installed. Installing...")
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "flask"])
-    from flask import Flask, jsonify, send_from_directory, render_template_string
+    from flask import Flask, jsonify, request, send_from_directory, render_template_string
 
 import config
 from event_db import EventDB
@@ -39,83 +45,112 @@ from evidence import HashChain
 app = Flask(__name__)
 
 # ── Use a unified dashboard database that aggregates all sources ───────────
-DASHBOARD_DB_PATH = "dashboard_all.db"
+DASHBOARD_DB_PATH = config.DASHBOARD_DB_PATH
 db = EventDB(db_path=DASHBOARD_DB_PATH)
 
+_sync_lock = threading.Lock()
+_last_sync = 0.0
+SYNC_MIN_INTERVAL = 2.0      # seconds; several tabs/requests share one sync
 
-# ── Import evidence logs from ALL video sources on startup ─────────────────
 
-def auto_import():
+# ── Import evidence logs from ALL video sources ────────────────────────────
+
+def _evidence_logs():
     """
-    Auto-import JSONL evidence logs from ALL video sources into the
-    unified dashboard database.  Scans for:
-      - evidence/evidence_log.jsonl          (original video)
-      - evidence_video_1/evidence_log.jsonl  (per-video dirs)
+    (jsonl_path, run_label) for every video source:
+      - evidence/evidence_log.jsonl          (original video -> input_video)
+      - evidence_video_1/evidence_log.jsonl  (per-video dirs -> video_1)
       - etc.
-    Each source gets its own run_label. import_from_jsonl uses
-    DELETE-then-INSERT per label, so old events within each label are
-    replaced with the latest data, while events from OTHER labels are
-    preserved. This means:
-      - Running video 1 updates video_1 events
-      - Video 2 and video 3 events remain untouched
-      - No duplicates, no data loss
     """
-    import glob
-    total = 0
-
-    # 1) Original evidence log
-    if os.path.exists(config.EVIDENCE_LOG_PATH):
-        count = db.import_from_jsonl(
-            jsonl_path=config.EVIDENCE_LOG_PATH,
-            run_label="input_video"
-        )
-        total += count
-
-    # 2) Per-video evidence logs  (evidence_*/evidence_log.jsonl)
+    logs = [(config.EVIDENCE_LOG_PATH, "input_video")]
     for edir in sorted(glob.glob("evidence_*")):
-        if not os.path.isdir(edir):
-            continue
         jsonl = os.path.join(edir, "evidence_log.jsonl")
-        if os.path.exists(jsonl):
-            label = os.path.basename(edir).replace("evidence_", "")
-            count = db.import_from_jsonl(jsonl_path=jsonl, run_label=label)
-            total += count
+        if os.path.isdir(edir) and os.path.exists(jsonl):
+            logs.append((jsonl, os.path.basename(edir).replace("evidence_", "", 1)))
+    return logs
 
-    # Note: We do NOT merge from per-video .db files here because the JSONL
-    # import already captures all events. This avoids creating duplicates.
 
+def auto_import(force=False):
+    """
+    Bring the unified dashboard database up to date with every video's
+    evidence log.  Only lines appended since the last sync are read
+    (EventDB.sync_from_jsonl), so this is cheap enough to run on every
+    request, and events from earlier runs are never deleted.
+    """
+    global _last_sync
+    with _sync_lock:
+        now = time.time()
+        if not force and now - _last_sync < SYNC_MIN_INTERVAL:
+            return 0
+        total = 0
+        for jsonl, label in _evidence_logs():
+            try:
+                total += db.sync_from_jsonl(jsonl, run_label=label)
+            except Exception as e:
+                print(f"[Dashboard] Could not sync {jsonl}: {e}")
+        _last_sync = time.time()
     if total > 0:
-        print(f"[Dashboard] Refreshed: {total} total events across all sources.")
+        print(f"[Dashboard] Imported {total} new events.")
+    return total
 
 
 # ── API Routes ────────────────────────────────────────────────────────────
 
+@app.after_request
+def no_cache(resp):
+    """Never let the browser serve stale dashboard data."""
+    if not request.path.startswith("/evidence-file/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/status")
+def api_status():
+    """Latest run and totals, shown in the header so updates are visible."""
+    auto_import()
+    runs = db.get_ablation_runs()
+    latest = max(runs, key=lambda r: r.get("timestamp") or "") if runs else None
+    return jsonify({
+        "total_events": db.get_event_count(),
+        "latest_run": latest["run_label"] if latest else None,
+        "server_time": datetime.now().strftime("%H:%M:%S"),
+    })
+
+
 @app.route("/api/refresh")
 def api_refresh():
-    """Re-import all evidence data from per-video sources."""
-    auto_import()
-    return jsonify({"status": "ok", "message": "Data refreshed"})
+    """Import any new evidence data from per-video sources."""
+    count = auto_import(force=True)
+    return jsonify({"status": "ok", "message": "Data refreshed", "new_events": count})
 
 
 @app.route("/api/stats")
 def api_stats():
-    """Get comprehensive statistics (auto-refreshes from per-video DBs)."""
-    # Re-import latest data from per-video databases
+    """Get comprehensive statistics (picks up new events first)."""
     auto_import()
-    stats = db.get_full_stats()
+    run = request.args.get("run") or None
+    stats = db.get_full_stats(run_label=run)
     return jsonify(stats)
+
+
+@app.route("/api/runs")
+def api_runs():
+    """Video sources (run labels) that have events."""
+    auto_import()
+    return jsonify(db.get_run_labels())
 
 
 @app.route("/api/events")
 def api_events():
-    """Get paginated event list."""
-    from flask import request
+    """Get paginated event list (picks up new events first)."""
+    auto_import()
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
     severity = request.args.get("severity")
     roi = request.args.get("roi")
+    run = request.args.get("run") or None
     events = db.get_events(limit=limit, offset=offset,
-                           severity=severity, roi_name=roi)
+                           severity=severity, roi_name=roi, run_label=run)
     return jsonify(events)
 
 
@@ -145,43 +180,70 @@ def api_config():
     return jsonify(flags)
 
 
+_chain_cache = {}   # {log_path: ((size, mtime), (valid, count, err))}
+
+
 @app.route("/api/chain/verify")
 def api_chain_verify():
-    """Verify the hash chain integrity."""
-    valid, count, err = HashChain.verify()
+    """Verify the hash chain of every video's evidence log."""
+    all_valid, total, errors = True, 0, []
+    for jsonl, label in _evidence_logs():
+        if not os.path.exists(jsonl):
+            continue
+        st = os.stat(jsonl)
+        sig = (st.st_size, st.st_mtime)
+        cached = _chain_cache.get(jsonl)
+        if cached and cached[0] == sig:
+            valid, count, err = cached[1]
+        else:
+            valid, count, err = HashChain.verify(jsonl)
+            _chain_cache[jsonl] = (sig, (valid, count, err))
+        total += count
+        if not valid:
+            all_valid = False
+            errors.append(f"{label}: {err}")
     return jsonify({
-        "valid": valid,
-        "record_count": count,
-        "error": err,
+        "valid": all_valid,
+        "record_count": total,
+        "error": "; ".join(errors) or None,
     })
 
 
 @app.route("/api/ablation")
 def api_ablation():
-    """Get ablation comparison results."""
+    """
+    Ablation comparison: one row per video run (saved by phy.py into the
+    dashboard DB) plus the profiles from `python ablation.py` (events.db).
+    """
     runs = db.get_ablation_runs()
+    if os.path.exists(config.DB_PATH) and \
+            os.path.abspath(config.DB_PATH) != os.path.abspath(DASHBOARD_DB_PATH):
+        try:
+            runs += EventDB(db_path=config.DB_PATH).get_ablation_runs()
+        except Exception as e:
+            print(f"[Dashboard] Could not read ablation runs from {config.DB_PATH}: {e}")
+    runs.sort(key=lambda r: r.get("timestamp") or "")
     return jsonify(runs)
 
 
 @app.route("/api/emails")
 def api_emails():
-    """Get email log (real + simulated)."""
-    email_log_path = "email_log.json"
+    """Get email log (real, simulated and dry-run), most recent first."""
+    email_log_path = config.EMAIL_LOG_PATH
     if not os.path.exists(email_log_path):
         return jsonify([])
     try:
         with open(email_log_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        # Return most recent first
-        return jsonify(list(reversed(data[-100:])))
-    except (json.JSONDecodeError, IOError):
+        limit = int(request.args.get("limit", 500))
+        return jsonify(list(reversed(data))[:limit])
+    except (json.JSONDecodeError, IOError, ValueError):
         return jsonify([])
 
 
 @app.route("/api/rois")
 def api_rois():
     """Get all ROI definitions from all video sources."""
-    import glob
     all_rois = {}
 
     # Scan all per-video ROI files
@@ -197,29 +259,33 @@ def api_rois():
 
     return jsonify(all_rois)
 
+
 @app.route("/api/photos")
 def api_photos():
-    """List evidence photos from ALL video sources."""
-    import glob
-    all_photos = []
-
-    # Scan original + all per-video photo directories
+    """List evidence photos from ALL video sources, newest first."""
     photo_dirs = [config.DETECTED_PHOTOS_DIR]
     photo_dirs.extend(sorted(glob.glob("detected_photos_*")))
 
+    entries = []
     for pdir in photo_dirs:
         if not os.path.isdir(pdir):
             continue
         dir_label = os.path.basename(pdir)
-        files = sorted(os.listdir(pdir), reverse=True)
-        for f in files:
-            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                all_photos.append({
-                    "name": f"[{dir_label}] {f}",
-                    "path": f"/evidence-file/{dir_label}/{f}"
-                })
+        source = dir_label.replace("detected_photos_", "", 1) \
+            if dir_label != config.DETECTED_PHOTOS_DIR else "input_video"
+        with os.scandir(pdir) as it:
+            for e in it:
+                if e.is_file() and e.name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    entries.append((e.stat().st_mtime, dir_label, source, e.name))
 
-    return jsonify(all_photos[:100])  # limit to 100 most recent
+    entries.sort(reverse=True)
+    limit = int(request.args.get("limit", 300))
+    return jsonify([{
+        "name": f"[{source}] {name}",
+        "source": source,
+        "time": datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+        "path": f"/evidence-file/{dir_label}/{name}",
+    } for mtime, dir_label, source, name in entries[:limit]])
 
 
 @app.route("/evidence-file/<path:subpath>")
@@ -232,7 +298,11 @@ def serve_photo(subpath):
     else:
         directory = config.DETECTED_PHOTOS_DIR
         filename = parts[0]
-    return send_from_directory(os.path.abspath(directory), filename)
+    if directory != config.DETECTED_PHOTOS_DIR and not directory.startswith("detected_photos_"):
+        return ("Not found", 404)
+    resp = send_from_directory(os.path.abspath(directory), filename)
+    resp.cache_control.max_age = 86400      # photos never change once saved
+    return resp
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────
@@ -245,7 +315,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <title>ROI Surveillance Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
     <style>
         :root {
             --bg-primary: #0a0e1a;
@@ -517,6 +587,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         .filter-group {
             display: flex;
             gap: 8px;
+            align-items: center;
+        }
+
+        .run-select {
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-glass);
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            font-family: 'Inter', sans-serif;
         }
 
         .filter-btn {
@@ -718,6 +799,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                 <h1>ROI Surveillance Dashboard</h1>
             </div>
             <div class="header-right">
+                <div class="status-badge" id="run-status" style="color:var(--text-secondary)">Connecting...</div>
                 <div class="status-badge" id="chain-status">
                     <span class="status-dot"></span>
                     <span>Loading...</span>
@@ -769,6 +851,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                     <div class="table-header">
                         <h3>📋 Event Log</h3>
                         <div class="filter-group">
+                            <select class="run-select" id="run-select">
+                                <option value="">All videos</option>
+                            </select>
                             <button class="filter-btn active" data-severity="all">All</button>
                             <button class="filter-btn" data-severity="HIGH">HIGH</button>
                             <button class="filter-btn" data-severity="MEDIUM">MEDIUM</button>
@@ -779,6 +864,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                         <thead>
                             <tr>
                                 <th>Time</th>
+                                <th>Video</th>
                                 <th>Track</th>
                                 <th>Severity</th>
                                 <th>ROI</th>
@@ -788,7 +874,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                             </tr>
                         </thead>
                         <tbody id="events-tbody">
-                            <tr><td colspan="7" class="loading"><div class="spinner"></div>Loading...</td></tr>
+                            <tr><td colspan="8" class="loading"><div class="spinner"></div>Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -819,6 +905,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                         <thead>
                             <tr>
                                 <th>Time</th>
+                                <th>Video</th>
                                 <th>To</th>
                                 <th>Subject</th>
                                 <th>Image</th>
@@ -826,7 +913,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                             </tr>
                         </thead>
                         <tbody id="emails-tbody">
-                            <tr><td colspan="5" class="loading"><div class="spinner"></div>Loading...</td></tr>
+                            <tr><td colspan="6" class="loading"><div class="spinner"></div>Loading...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -858,6 +945,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     // ── State ──────────────────────────────────────────────────────────────
     let charts = {};
     let currentFilter = 'all';
+    let currentRun = '';
+    const loaders = {
+        overview: loadOverview,
+        events: loadEvents,
+        evidence: loadPhotos,
+        config: loadConfig,
+        emails: loadEmails,
+        ablation: loadAblation,
+    };
 
     // ── Tab switching ─────────────────────────────────────────────────────
     document.querySelectorAll('.tab').forEach(tab => {
@@ -867,11 +963,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             tab.classList.add('active');
             document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
 
-            if (tab.dataset.tab === 'events') loadEvents();
-            if (tab.dataset.tab === 'evidence') loadPhotos();
-            if (tab.dataset.tab === 'config') loadConfig();
-            if (tab.dataset.tab === 'emails') loadEmails();
-            if (tab.dataset.tab === 'ablation') loadAblation();
+            loaders[tab.dataset.tab]();
         });
     });
 
@@ -885,17 +977,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         });
     });
 
+    document.getElementById('run-select').addEventListener('change', e => {
+        currentRun = e.target.value;
+        loadEvents();
+    });
+
+    async function loadRuns() {
+        try {
+            const runs = await api('/api/runs');
+            if (!changed('runs', runs)) return;
+            const sel = document.getElementById('run-select');
+            sel.innerHTML = '<option value="">All videos</option>' +
+                runs.map(r => `<option value="${r}">${r}</option>`).join('');
+            sel.value = runs.includes(currentRun) ? currentRun : '';
+        } catch (e) {
+            console.error('Error loading runs:', e);
+        }
+    }
+
     // ── API helpers ───────────────────────────────────────────────────────
     async function api(path) {
         const res = await fetch(path);
         return await res.json();
     }
 
+    // Skip re-rendering (and image/chart flicker on auto-refresh) when a
+    // panel's data has not changed since it was last drawn.
+    const lastRendered = {};
+    function changed(key, data) {
+        const sig = JSON.stringify(data);
+        if (lastRendered[key] === sig) return false;
+        lastRendered[key] = sig;
+        return true;
+    }
+
     // ── Load stats and charts ─────────────────────────────────────────────
     async function loadOverview() {
         try {
             const stats = await api('/api/stats');
+            if (!changed('overview', stats)) return;
             renderStats(stats);
+            if (typeof Chart === 'undefined') return;   // chart library not loaded (offline)
             renderSeverityChart(stats.severity_counts);
             renderTimelineChart(stats.timeline);
             renderBehaviourChart(stats.behaviour_counts);
@@ -996,10 +1118,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     function renderBehaviourChart(behaviours) {
         const ctx = document.getElementById('chart-behaviour');
         if (charts.behaviour) charts.behaviour.destroy();
-        if (!behaviours || Object.keys(behaviours).length === 0) {
-            ctx.parentElement.innerHTML += '<div class="empty-state"><div class="icon">🏃</div><p>No behaviour data</p></div>';
-            return;
-        }
+        charts.behaviour = null;
+        if (!behaviours || Object.keys(behaviours).length === 0) return;
 
         const labels = Object.keys(behaviours);
         const values = Object.values(behaviours);
@@ -1064,20 +1184,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     // ── Events table ──────────────────────────────────────────────────────
     async function loadEvents() {
-        const params = currentFilter !== 'all' ? `?severity=${currentFilter}&limit=100` : '?limit=100';
+        const qs = new URLSearchParams({ limit: 200 });
+        if (currentFilter !== 'all') qs.set('severity', currentFilter);
+        if (currentRun) qs.set('run', currentRun);
         try {
-            const events = await api('/api/events' + params);
+            const [events] = await Promise.all([api('/api/events?' + qs), loadRuns()]);
+            if (!changed('events', events)) return;
             const tbody = document.getElementById('events-tbody');
             if (events.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="empty-state"><div class="icon">📋</div><p>No events found</p></td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" class="empty-state"><div class="icon">📋</div><p>No events found</p></td></tr>';
                 return;
             }
             tbody.innerHTML = events.map(e => {
                 let reasons = '';
                 try { reasons = JSON.parse(e.reasons || '[]').join(', '); } catch { reasons = e.reasons || ''; }
-                const time = e.timestamp ? e.timestamp.split('T')[1]?.substring(0, 8) || e.timestamp : '';
+                const time = e.timestamp ? e.timestamp.replace('T', ' ').substring(0, 19) : '';
                 return `<tr>
                     <td>${time}</td>
+                    <td>${e.run_label || '-'}</td>
                     <td>${e.incident_id || '-'}</td>
                     <td><span class="severity-pill ${e.severity}">${e.severity}</span></td>
                     <td>${e.roi_name || '-'}</td>
@@ -1095,6 +1219,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function loadPhotos() {
         try {
             const photos = await api('/api/photos');
+            if (!changed('photos', photos)) return;
             const gallery = document.getElementById('gallery');
             if (photos.length === 0) {
                 gallery.innerHTML = '<div class="empty-state"><div class="icon">📸</div><p>No evidence photos</p></div>';
@@ -1103,7 +1228,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             gallery.innerHTML = photos.map(p => `
                 <div class="gallery-item" onclick="window.open('${p.path}','_blank')">
                     <img src="${p.path}" alt="${p.name}" loading="lazy">
-                    <div class="caption">${p.name}</div>
+                    <div class="caption">${p.name}<br>${(p.time || '').replace('T', ' ')}</div>
                 </div>
             `).join('');
         } catch (e) {
@@ -1151,6 +1276,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function loadAblation() {
         try {
             const runs = await api('/api/ablation');
+            if (!changed('ablation', runs)) return;
             const content = document.getElementById('ablation-content');
 
             if (runs.length === 0) {
@@ -1158,7 +1284,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
                     <div class="icon">🔬</div>
                     <p>No ablation results yet</p>
                     <p style="font-size:0.8rem;margin-top:8px;color:var(--text-muted)">
-                        Run: <code>python ablation.py</code> to generate results
+                        Finish a dry run of a video, or run
+                        <code>python ablation.py --source "video 1.mp4"</code>
                     </p>
                 </div>`;
                 return;
@@ -1191,7 +1318,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
             </table>`;
 
             // Ablation charts
-            renderAblationCharts(runs);
+            if (typeof Chart !== 'undefined') renderAblationCharts(runs);
         } catch (e) {
             console.error('Error loading ablation:', e);
         }
@@ -1273,15 +1400,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     async function loadEmails() {
         try {
             const emails = await api('/api/emails');
+            if (!changed('emails', emails)) return;
             const tbody = document.getElementById('emails-tbody');
             if (emails.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="empty-state"><div class="icon">&#x1F4E7;</div><p>No emails sent yet</p></td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state"><div class="icon">&#x1F4E7;</div><p>No emails sent yet</p></td></tr>';
                 return;
             }
             tbody.innerHTML = emails.map(e => {
-                const statusClass = e.status && e.status.includes('simulated') ? 'severity-pill LOW' : 'severity-pill MEDIUM';
+                const statusClass = e.status && (e.status.includes('simulated') || e.status.includes('dry-run')) ? 'severity-pill LOW' : 'severity-pill MEDIUM';
                 return `<tr>
                     <td>${e.timestamp || '-'}</td>
+                    <td>${e.source || '-'}</td>
                     <td>${e.to || '-'}</td>
                     <td style="font-weight:500">${e.subject || '-'}</td>
                     <td style="color:var(--text-muted);font-size:0.75rem">${e.image || '-'}</td>
@@ -1293,18 +1422,44 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         }
     }
 
-    // ── Initialize ────────────────────────────────────────────────────────
-    loadOverview();
-    checkChain();
+    // ── Header: latest run + total events (shows the dashboard is live) ───
+    let lastRunSeen = null;
+    async function checkStatus() {
+        try {
+            const st = await api('/api/status');
+            document.getElementById('run-status').textContent =
+                `Last run: ${st.latest_run || '-'} · ${st.total_events} events · updated ${st.server_time}`;
+            if (lastRunSeen !== null && st.latest_run !== lastRunSeen) {
+                // A dry run just finished: redraw everything with its data
+                for (const k in lastRendered) delete lastRendered[k];
+                const activeTab = document.querySelector('.tab.active');
+                if (activeTab) loaders[activeTab.dataset.tab]();
+                checkChain();
+            }
+            lastRunSeen = st.latest_run;
+        } catch (e) {
+            document.getElementById('run-status').textContent = 'Dashboard server offline';
+        }
+    }
 
-    // Auto-refresh overview every 15 seconds to pick up new video data
+    // ── Initialize ────────────────────────────────────────────────────────
+    // Chart.js loads with `defer`, i.e. after this script; start once it has.
+    document.addEventListener('DOMContentLoaded', () => {
+        loadOverview();
+        checkChain();
+        checkStatus();
+    });
+    setInterval(checkStatus, 3000);
+
+    // Auto-refresh whichever tab is open, so every tab (not just the
+    // overview) shows new events, photos, emails and runs while a video runs.
     setInterval(() => {
         const activeTab = document.querySelector('.tab.active');
-        if (activeTab && activeTab.dataset.tab === 'overview') {
-            loadOverview();
-            checkChain();
+        if (activeTab && activeTab.dataset.tab !== 'config') {
+            loaders[activeTab.dataset.tab]();
         }
-    }, 15000);
+    }, 5000);
+    setInterval(checkChain, 15000);
     </script>
 </body>
 </html>"""
@@ -1326,14 +1481,14 @@ def main():
                         help="Import JSONL evidence log into database first")
     args = parser.parse_args()
 
-    auto_import()
+    auto_import(force=True)
 
     print(f"\n+{'='*52}+")
     print(f"|  ROI Surveillance Dashboard                        |")
     print(f"|  http://{args.host}:{args.port}                       |")
     print(f"+{'='*52}+\n")
 
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
