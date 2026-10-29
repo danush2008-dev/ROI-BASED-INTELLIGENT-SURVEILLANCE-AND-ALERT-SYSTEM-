@@ -9,6 +9,7 @@ Handles:
 """
 
 import os
+import time
 import queue
 import threading
 import smtplib
@@ -76,13 +77,17 @@ def _play_alarm():
             _alarm_method = None
 
 
-def _send_email(image_path, subject="Intruder Alert", extra_body=""):
+def _send_email(image_path, subject="Intruder Alert", extra_body="", source=None,
+                dry_run=False):
     """
     Send an email alert with the intruder detection image attached.
 
     Strategy:
       1. Try real Gmail SMTP (SSL/465 then STARTTLS/587)
       2. If SMTP fails, fall back to simulated email (logged to email_log.json)
+
+    In dry-run mode nothing is sent; the email is only logged (status
+    "dry-run (not sent)") so it still shows up on the dashboard.
 
     Returns True on success (real or simulated), False on failure.
     """
@@ -102,6 +107,16 @@ def _send_email(image_path, subject="Intruder Alert", extra_body=""):
     body += "\nPlease review the attached image immediately."
 
     # ── Try real SMTP if credentials are configured ────────────────────────
+    if dry_run:
+        _log_email(
+            sender=sender or "surveillance@system.local",
+            receiver=receiver or "admin@system.local",
+            subject=subject, body=body, image_path=image_path,
+            detection_time=detection_time, source=source,
+            status="dry-run (not sent)",
+        )
+        return True
+
     smtp_success = False
     if sender and password and receiver and 'placeholder' not in password.lower():
         msg = EmailMessage()
@@ -133,6 +148,8 @@ def _send_email(image_path, subject="Intruder Alert", extra_body=""):
                     server.send_message(msg)
                 print(f"[EMAIL] Alert sent successfully (SSL/465) at {detection_time}")
                 smtp_success = True
+                _log_email(sender, receiver, subject, body, image_path,
+                           detection_time, source, status="sent")
             except (smtplib.SMTPServerDisconnected, ConnectionError, OSError):
                 with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
                     server.ehlo()
@@ -142,67 +159,88 @@ def _send_email(image_path, subject="Intruder Alert", extra_body=""):
                     server.send_message(msg)
                 print(f"[EMAIL] Alert sent successfully (STARTTLS/587) at {detection_time}")
                 smtp_success = True
+                _log_email(sender, receiver, subject, body, image_path,
+                           detection_time, source, status="sent")
         except Exception:
             pass  # Fall through to simulated email
 
     # ── Simulated email (always works, great for demos) ────────────────────
     if not smtp_success:
-        _log_simulated_email(
+        _log_email(
             sender=sender or "surveillance@system.local",
             receiver=receiver or "admin@system.local",
             subject=subject,
             body=body,
             image_path=image_path,
             detection_time=detection_time,
+            source=source,
         )
 
     return True
 
 
 # ── Email log path ────────────────────────────────────────────────────────
-EMAIL_LOG_PATH = "email_log.json"
+EMAIL_LOG_PATH = config.EMAIL_LOG_PATH
+_email_log_lock = threading.Lock()
 
 
-def _log_simulated_email(sender, receiver, subject, body, image_path,
-                         detection_time):
+def _log_email(sender, receiver, subject, body, image_path,
+               detection_time, source=None, status="sent (simulated)"):
     """
-    Log a simulated email to email_log.json.
+    Append an email (sent, simulated or dry-run) to email_log.json.
     Each entry records full email details so the dashboard can display them.
+    Entries are never dropped, so every run's emails are kept.
     """
     import json
 
     entry = {
         "timestamp": detection_time,
+        "source": source,
         "from": sender,
         "to": receiver,
         "subject": subject,
         "body": body,
         "image": os.path.basename(image_path) if image_path else None,
-        "status": "sent (simulated)",
+        "image_path": image_path,
+        "status": status,
     }
 
-    # Append to log file
-    log_data = []
-    if os.path.exists(EMAIL_LOG_PATH):
-        try:
-            with open(EMAIL_LOG_PATH, "r", encoding="utf-8") as f:
-                log_data = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            log_data = []
+    with _email_log_lock:
+        log_data = []
+        if os.path.exists(EMAIL_LOG_PATH):
+            try:
+                with open(EMAIL_LOG_PATH, "r", encoding="utf-8") as f:
+                    log_data = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                # Don't overwrite a log we cannot read - keep it aside
+                backup = EMAIL_LOG_PATH + ".corrupt"
+                try:
+                    os.replace(EMAIL_LOG_PATH, backup)
+                    print(f"[EMAIL] Unreadable email log moved to {backup}")
+                except OSError:
+                    pass
+                log_data = []
 
-    log_data.append(entry)
+        log_data.append(entry)
 
-    # Keep last 200 entries
-    if len(log_data) > 200:
-        log_data = log_data[-200:]
+        # Write to a temp file and swap it in, so the dashboard never
+        # reads a half-written file
+        tmp_path = EMAIL_LOG_PATH + ".tmp"
+        for attempt in range(10):
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(log_data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, EMAIL_LOG_PATH)
+                break
+            except OSError as e:
+                # On Windows the swap fails while the dashboard has the file
+                # open for reading - retry briefly
+                if attempt == 9:
+                    print(f"[EMAIL] Warning: could not write email log: {e}")
+                else:
+                    time.sleep(0.1)
 
-    try:
-        with open(EMAIL_LOG_PATH, "w", encoding="utf-8") as f:
-            json.dump(log_data, f, indent=2, ensure_ascii=False)
-    except IOError as e:
-        print(f"[EMAIL] Warning: could not write email log: {e}")
-
-    print(f"[EMAIL] Alert email logged at {detection_time}")
+    print(f"[EMAIL] Alert email logged ({status}) at {detection_time}")
     print(f"[EMAIL]   To: {receiver} | Subject: {subject}")
 
 
@@ -224,19 +262,22 @@ class AlertWorker:
       }
     """
 
-    def __init__(self, dry_run=False):
+    def __init__(self, dry_run=False, source_label=None):
         self._queue = queue.Queue()
         self._dry_run = dry_run
+        self._source_label = source_label
         self._shutdown = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True, name="AlertWorker")
         self._thread.start()
 
     def _worker(self):
         """Worker loop: process alert items from the queue."""
-        while not self._shutdown.is_set():
+        while True:
             try:
                 item = self._queue.get(timeout=0.5)
             except queue.Empty:
+                if self._shutdown.is_set():
+                    break
                 continue
 
             if item is None:  # poison pill for shutdown
@@ -264,14 +305,15 @@ class AlertWorker:
         if alert_type in ("email", "both"):
             if dry_run:
                 print(f"[AlertWorker] DRY-RUN: email would be sent for {item.get('image_path')}")
-            else:
-                success = _send_email(
-                    image_path=item.get("image_path"),
-                    subject=item.get("subject", "Intruder Alert"),
-                    extra_body=item.get("extra_body", ""),
-                )
-                # Store result for potential logging
-                item["email_success"] = success
+            success = _send_email(
+                image_path=item.get("image_path"),
+                subject=item.get("subject", "Intruder Alert"),
+                extra_body=item.get("extra_body", ""),
+                source=self._source_label,
+                dry_run=dry_run,
+            )
+            # Store result for potential logging
+            item["email_success"] = success
 
     def enqueue(self, alert_type="both", image_path=None, subject="Intruder Alert",
                 extra_body="", dry_run=None):
@@ -293,13 +335,14 @@ class AlertWorker:
             "dry_run": dry_run if dry_run is not None else self._dry_run,
         })
 
-    def shutdown(self, timeout=5.0):
+    def shutdown(self, timeout=30.0):
         """
         Gracefully shut down the worker: flush remaining items, then join.
         """
         print("[AlertWorker] Shutting down...")
         self._shutdown.set()
-        # Put poison pill to unblock the worker if it's waiting
+        # Poison pill goes behind any queued alerts, so they are all
+        # processed (and logged) before the worker exits
         self._queue.put(None)
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():

@@ -12,6 +12,7 @@ Schema:
 
 import os
 import json
+import hashlib
 import sqlite3
 from datetime import datetime
 from contextlib import contextmanager
@@ -61,6 +62,12 @@ class EventDB:
         notes TEXT DEFAULT ''
     );
 
+    CREATE TABLE IF NOT EXISTS import_state (
+        source_path TEXT PRIMARY KEY,
+        run_label TEXT NOT NULL,
+        byte_offset INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS idx_severity ON events(severity);
     CREATE INDEX IF NOT EXISTS idx_timestamp ON events(timestamp);
     CREATE INDEX IF NOT EXISTS idx_incident ON events(incident_id);
@@ -76,11 +83,16 @@ class EventDB:
         """Create tables and indexes if they don't exist."""
         with self._connect() as conn:
             conn.executescript(self.SCHEMA)
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(import_state)")}
+            if "head_sig" not in cols:
+                conn.execute("ALTER TABLE import_state ADD COLUMN head_sig TEXT")
 
     @contextmanager
     def _connect(self):
         """Context manager for database connections."""
-        conn = sqlite3.connect(self._db_path)
+        # phy.py and the dashboard write to the same file; wait for the
+        # other one's commit instead of failing with "database is locked"
+        conn = sqlite3.connect(self._db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -93,31 +105,108 @@ class EventDB:
 
     # ── Event CRUD ────────────────────────────────────────────────────────
 
+    _INSERT_SQL = """
+        INSERT INTO events (
+            timestamp, incident_id, track_id, severity, reasons,
+            dwell_seconds, behaviour, roi_name, photo_path,
+            clip_path, photo_sha256, chain_hash, prev_hash, run_label
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    @staticmethod
+    def _event_row(event_data, run_label):
+        reasons = event_data.get("reasons", [])
+        if not isinstance(reasons, str):
+            reasons = json.dumps(reasons)
+        return (
+            event_data.get("timestamp", datetime.now().isoformat()),
+            str(event_data.get("incident_id", "")),
+            event_data.get("track_id"),
+            event_data.get("severity", "LOW"),
+            reasons,
+            event_data.get("dwell_seconds", 0.0),
+            event_data.get("behaviour"),
+            event_data.get("roi_name"),
+            event_data.get("photo_path"),
+            event_data.get("clip_path"),
+            event_data.get("photo_sha256"),
+            event_data.get("hash"),
+            event_data.get("prev_hash"),
+            run_label,
+        )
+
     def insert_event(self, event_data, run_label="live"):
         """Insert a single event record."""
+        self.insert_events([event_data], run_label)
+
+    def insert_events(self, events, run_label="live"):
+        """Insert many event records in one transaction (one disk commit)."""
+        if not events:
+            return
         with self._connect() as conn:
-            conn.execute("""
-                INSERT INTO events (
-                    timestamp, incident_id, track_id, severity, reasons,
-                    dwell_seconds, behaviour, roi_name, photo_path,
-                    clip_path, photo_sha256, chain_hash, prev_hash, run_label
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                event_data.get("timestamp", datetime.now().isoformat()),
-                str(event_data.get("incident_id", "")),
-                event_data.get("track_id"),
-                event_data.get("severity", "LOW"),
-                json.dumps(event_data.get("reasons", [])),
-                event_data.get("dwell_seconds", 0.0),
-                event_data.get("behaviour"),
-                event_data.get("roi_name"),
-                event_data.get("photo_path"),
-                event_data.get("clip_path"),
-                event_data.get("photo_sha256"),
-                event_data.get("hash"),
-                event_data.get("prev_hash"),
-                run_label,
-            ))
+            conn.executemany(self._INSERT_SQL,
+                             [self._event_row(e, run_label) for e in events])
+
+    def sync_from_jsonl(self, jsonl_path, run_label):
+        """
+        Incrementally import a JSONL evidence log: only the lines appended
+        since the last sync are read, and nothing already imported is ever
+        deleted, so every run's events are kept.
+
+        Returns:
+            Number of new records imported.
+        """
+        if not os.path.exists(jsonl_path):
+            return 0
+        key = os.path.abspath(jsonl_path)
+        size = os.path.getsize(jsonl_path)
+        # Fingerprint of the file's start: tells a log that was deleted and
+        # started again apart from the same log grown longer
+        with open(jsonl_path, 'rb') as f:
+            head_sig = hashlib.sha1(f.read(256)).hexdigest()
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT byte_offset, head_sig FROM import_state WHERE source_path = ?",
+                (key,)).fetchone()
+            if row is None:
+                # First sync of this log. Events for this label imported by
+                # the old full re-import are replaced by the log's contents
+                # (the log holds every one of them), so nothing is duplicated.
+                conn.execute("DELETE FROM events WHERE run_label = ?",
+                             (run_label,))
+                offset = 0
+            else:
+                offset = row["byte_offset"]
+                if size < offset or (row["head_sig"] and row["head_sig"] != head_sig
+                                     and offset >= 256):
+                    offset = 0          # log was deleted and started again
+            if size == offset:
+                return 0
+
+            with open(jsonl_path, 'rb') as f:
+                f.seek(offset)
+                chunk = f.read()
+            # Only consume complete lines; a half-written last line is
+            # picked up on the next sync.
+            end = chunk.rfind(b'\n') + 1
+            rows = []
+            for line in chunk[:end].splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(self._event_row(
+                        json.loads(line.decode('utf-8')), run_label))
+                except (ValueError, UnicodeDecodeError) as e:
+                    print(f"[EventDB] Skipping bad record: {e}")
+            if rows:
+                conn.executemany(self._INSERT_SQL, rows)
+            conn.execute(
+                "INSERT OR REPLACE INTO import_state "
+                "(source_path, run_label, byte_offset, head_sig) VALUES (?, ?, ?, ?)",
+                (key, run_label, offset + end, head_sig))
+        return len(rows)
 
     def import_from_jsonl(self, jsonl_path=None, run_label="live"):
         """
@@ -180,6 +269,14 @@ class EventDB:
         return count
 
     # ── Queries ───────────────────────────────────────────────────────────
+
+    def get_run_labels(self):
+        """Distinct run labels (video sources) that have events."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT run_label FROM events ORDER BY run_label"
+            ).fetchall()
+            return [r["run_label"] for r in rows]
 
     def get_events(self, limit=100, offset=0, severity=None, roi_name=None,
                    run_label=None):

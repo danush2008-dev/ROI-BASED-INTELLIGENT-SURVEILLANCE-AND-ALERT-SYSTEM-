@@ -31,6 +31,7 @@ class ROIManager:
         self.rois = []           # list of dicts: {name, points, restricted_hours, sensitivity}
         self._drawing_pts = []   # temp points for the current drawing session
         self._drawing_name = ""  # name assigned during drawing
+        self._masks = {}         # {roi points key: (x, y, mask)} for box overlap tests
 
     # ── Persistence ────────────────────────────────────────────────────────
 
@@ -41,6 +42,8 @@ class ROIManager:
                 with open(self.json_path, "r") as f:
                     data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
+                    for roi in data:
+                        roi["points"] = self._fix_polygon(roi["points"])
                     self.rois = data
                     print(f"[ROI] Loaded {len(self.rois)} ROI(s) from {self.json_path}")
                     return True
@@ -93,6 +96,8 @@ class ROIManager:
         print("  S          : save current ROI (need ≥ 4 pts)")
         print("  N          : start drawing another ROI")
         print("  Q          : quit drawing, proceed")
+        print("  Tip: click the corners in order around the area, and cover")
+        print("       the floor/steps where people's FEET will be.")
         print("══════════════════════════════════════════\n")
 
         while True:
@@ -107,10 +112,12 @@ class ROIManager:
                     cv2.putText(display, roi["name"], tuple(roi["points"][0]),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-            # Draw current in-progress polygon in yellow
+            # Draw current in-progress polygon in yellow (closed, so you
+            # can see the final shape before saving)
             if len(self._drawing_pts) > 0:
                 pts_np = np.array(self._drawing_pts, dtype=np.int32)
-                cv2.polylines(display, [pts_np], False, (0, 255, 255), 2)
+                cv2.polylines(display, [pts_np], len(self._drawing_pts) >= 3,
+                              (0, 255, 255), 2)
                 for pt in self._drawing_pts:
                     cv2.circle(display, tuple(pt), 4, (0, 255, 255), -1)
 
@@ -127,7 +134,7 @@ class ROIManager:
                     roi_name = f"Zone {roi_index}"
                     self.rois.append({
                         "name": roi_name,
-                        "points": list(self._drawing_pts),
+                        "points": self._fix_polygon(self._drawing_pts),
                         "restricted_hours": None,
                         "sensitivity": 1.0,
                     })
@@ -143,7 +150,7 @@ class ROIManager:
                     roi_name = f"Zone {roi_index}"
                     self.rois.append({
                         "name": roi_name,
-                        "points": list(self._drawing_pts),
+                        "points": self._fix_polygon(self._drawing_pts),
                         "restricted_hours": None,
                         "sensitivity": 1.0,
                     })
@@ -158,7 +165,7 @@ class ROIManager:
                     roi_name = f"Zone {roi_index}"
                     self.rois.append({
                         "name": roi_name,
-                        "points": list(self._drawing_pts),
+                        "points": self._fix_polygon(self._drawing_pts),
                         "restricted_hours": None,
                         "sensitivity": 1.0,
                     })
@@ -191,6 +198,77 @@ class ROIManager:
         poly = np.array(polygon_pts, dtype=np.int32)
         result = cv2.pointPolygonTest(poly, (int(point[0]), int(point[1])), False)
         return result >= 0  # >= 0 means inside or on boundary
+
+    def box_in_roi(self, roi, x1, y1, x2, y2, test_point):
+        """
+        Is a person inside this ROI?
+
+        Yes if the test point (normally the feet) is inside the polygon, or
+        if at least config.ROI_MIN_OVERLAP of the person's box lies inside
+        it.  The overlap rule matters for hand-drawn ROIs: people tend to
+        outline where the person *appears* (e.g. the whole staircase), and
+        with the feet hidden behind a railing or step the box bottom can
+        fall just outside such an outline.
+        """
+        if self.point_in_polygon(test_point, roi["points"]):
+            return True
+        if config.ROI_MIN_OVERLAP <= 0:
+            return False
+        area = max(1, (x2 - x1) * (y2 - y1))
+        px, py, mask = self._roi_mask(roi)
+        mh, mw = mask.shape
+        ix1, iy1 = max(x1, px), max(y1, py)
+        ix2, iy2 = min(x2, px + mw), min(y2, py + mh)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return False
+        inside = np.count_nonzero(mask[iy1 - py:iy2 - py, ix1 - px:ix2 - px])
+        return inside / area >= config.ROI_MIN_OVERLAP
+
+    def _roi_mask(self, roi):
+        """Filled polygon mask over the ROI's bounding rectangle (cached)."""
+        key = tuple(map(tuple, roi["points"]))
+        cached = self._masks.get(key)
+        if cached is None:
+            pts = np.array(roi["points"], dtype=np.int32)
+            x, y, w, h = cv2.boundingRect(pts)
+            mask = np.zeros((max(1, h), max(1, w)), dtype=np.uint8)
+            cv2.fillPoly(mask, [pts - [x, y]], 1)
+            cached = self._masks[key] = (x, y, mask)
+        return cached
+
+    @staticmethod
+    def _fix_polygon(pts):
+        """
+        Clicking the corners out of order (e.g. top-left, top-right,
+        bottom-left, bottom-right) makes a bow-tie shape whose "inside" is
+        mostly empty.  Replace a self-intersecting outline by its convex hull.
+        """
+        pts = [list(p) for p in pts]
+        # Drop a closing click that repeats the first corner
+        while (len(pts) > 3 and abs(pts[-1][0] - pts[0][0]) <= 3
+               and abs(pts[-1][1] - pts[0][1]) <= 3):
+            pts.pop()
+        n = len(pts)
+
+        def cross(o, a, b):
+            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+        def segments_cross(p1, p2, p3, p4):
+            d1, d2 = cross(p3, p4, p1), cross(p3, p4, p2)
+            d3, d4 = cross(p1, p2, p3), cross(p1, p2, p4)
+            return d1 * d2 < 0 and d3 * d4 < 0
+
+        for i in range(n):
+            for j in range(i + 2, n):
+                if i == 0 and j == n - 1:
+                    continue        # neighbouring edges share a corner
+                if segments_cross(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n]):
+                    hull = cv2.convexHull(np.array(pts, dtype=np.int32))
+                    fixed = [[int(p[0][0]), int(p[0][1])] for p in hull]
+                    print("[ROI] The outline crossed itself (corners clicked out of "
+                          "order) - using its outer shape instead.")
+                    return fixed
+        return pts
 
     @staticmethod
     def get_foot_point(x1, y1, x2, y2):
